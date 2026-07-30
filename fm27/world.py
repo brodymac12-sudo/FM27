@@ -44,6 +44,7 @@ class GameWorld:
         self.records: dict = {"biggest_win": None, "best_season_points": None,
                               "most_goals_in_season": None}
         self.last_window_transfers: list[str] = []
+        self.baseline_ca = 0.0   # league-quality anchor set at world creation
 
     # ------------------------------------------------------------- world setup
 
@@ -58,8 +59,13 @@ class GameWorld:
                 club.tactics.formation = world.rng.choice(list(FORMATIONS))
                 world.clubs[cid] = club
                 cid += 1
+        world.baseline_ca = world._avg_ability()
         world._start_season(first=True)
         return world
+
+    def _avg_ability(self) -> float:
+        players = [p for c in self.clubs.values() for p in c.squad]
+        return sum(p.ability for p in players) / max(1, len(players))
 
     def _take_pid(self) -> int:
         pid = self.next_pid
@@ -262,7 +268,7 @@ class GameWorld:
     def _post_event_recovery(self, played_club_ids: set[int]) -> None:
         for club in self.clubs.values():
             for p in club.squad:
-                p.fitness = min(100.0, p.fitness + 9.0)
+                p.fitness = min(100.0, p.fitness + 12.0)
                 if p.injured_for > 0:
                     p.injured_for -= 1
                 elif p.suspended_for > 0 and club.id in played_club_ids:
@@ -439,23 +445,28 @@ class GameWorld:
         return notes[:8]
 
     def _youth_intake(self) -> None:
+        # Negative feedback keeps the league's overall quality stationary:
+        # if the world has drifted above its founding level, the next crop of
+        # regens comes in weaker (and vice versa), so eras of great players
+        # are followed by leaner ones instead of endless inflation.
+        correction = max(-8.0, min(8.0, self.baseline_ca - self._avg_ability()))
         for club in self.clubs.values():
             for _ in range(self.rng.randint(3, 4)):
                 pos = self.rng.choices(["GK", "DF", "MF", "FW"],
                                        weights=[1, 3, 3, 2])[0]
                 age = self.rng.randint(16, 18)
-                target = club.reputation * 0.55 + self.rng.uniform(-6, 6)
+                target = club.reputation * 0.55 + correction + self.rng.uniform(-6, 6)
                 youth = generate_player(self.rng, self._take_pid(), pos, age, target)
                 youth.potential = int(min(97, max(
                     youth.potential,
-                    club.reputation + self.rng.uniform(-12, 10))))
+                    club.reputation + correction + self.rng.uniform(-12, 10))))
                 club.add_player(youth)
             # Emergency depth so a selling club can always field a team.
             while len(club.squad) < 16:
                 pos = self.rng.choice(["GK", "DF", "MF", "FW"])
                 filler = generate_player(self.rng, self._take_pid(), pos,
                                          self.rng.randint(19, 23),
-                                         club.reputation * 0.7)
+                                         club.reputation * 0.7 + correction)
                 club.add_player(filler)
 
     def _trim_squads(self) -> dict[str, int]:
@@ -527,6 +538,7 @@ class GameWorld:
             "retired": self.retired,
             "records": self.records,
             "last_window_transfers": self.last_window_transfers,
+            "baseline_ca": self.baseline_ca,
             "rng_state": [state[0], list(state[1]), state[2]],
         }
 
@@ -551,6 +563,7 @@ class GameWorld:
         world.retired = d["retired"]
         world.records = d["records"]
         world.last_window_transfers = d["last_window_transfers"]
+        world.baseline_ca = d.get("baseline_ca") or world._avg_ability()
         s = d["rng_state"]
         world.rng.setstate((s[0], tuple(s[1]), s[2]))
         return world

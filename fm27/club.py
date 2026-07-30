@@ -78,18 +78,34 @@ class Club:
     def pick_lineup(self, rng: random.Random | None = None) -> list[Player]:
         """Best available XI for the current formation.
 
-        Falls back to out-of-position players (with their ability penalty)
-        when a position is short of fit bodies.
+        Players compete for their *natural* position's slots first — a star
+        forward is never repurposed as a defender just because the back line
+        is weak. Out-of-position filling only happens when a position runs
+        out of fit bodies. Fitness nudges selection but never benches a
+        clearly better player.
         """
         df, mf, fw = self.tactics.shape()
-        need = [("GK", 1), ("DF", df), ("MF", mf), ("FW", fw)]
-        available = [p for p in self.squad if p.available]
+        need = {"GK": 1, "DF": df, "MF": mf, "FW": fw}
+        available = sorted(
+            (p for p in self.squad if p.available),
+            key=lambda p: p.ability * (0.9 + 0.1 * p.fitness / 100),
+            reverse=True)
         chosen: list[Player] = []
-        for pos, count in need:
-            pool = [p for p in available if p not in chosen]
-            pool.sort(key=lambda p: p.rating_at(pos) * (0.7 + 0.3 * p.fitness / 100),
-                      reverse=True)
-            chosen.extend(pool[:count])
+        counts = {pos: 0 for pos in need}
+        leftovers: list[Player] = []
+        for p in available:
+            if counts[p.position] < need[p.position]:
+                chosen.append(p)
+                counts[p.position] += 1
+            else:
+                leftovers.append(p)
+        for pos, count in need.items():
+            while counts[pos] < count and leftovers:
+                best = max(leftovers,
+                           key=lambda q: q.rating_at(pos) * (0.9 + 0.1 * q.fitness / 100))
+                leftovers.remove(best)
+                chosen.append(best)
+                counts[pos] += 1
         # Emergency: fewer than 11 fit players — field whoever exists.
         if len(chosen) < 11:
             rest = [p for p in self.squad if p not in chosen]

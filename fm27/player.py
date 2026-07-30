@@ -1,4 +1,15 @@
-"""Player model: attributes, ability, value, development, and career stats."""
+"""Player model: attributes, ability, value, development, and career stats.
+
+Players carry 17 attributes across four groups, FM-style:
+
+- Technical: finishing, dribbling, passing, crossing, tackling, heading
+- Mental:    vision, positioning, composure, work_rate
+- Physical:  pace, stamina, strength
+- Keeping:   reflexes, handling, aerial, kicking
+
+Overall ability is a position-weighted blend. Physical attributes decline
+fastest with age (pace first), mental ones barely at all.
+"""
 
 from __future__ import annotations
 
@@ -7,14 +18,31 @@ import random
 from .names import random_identity
 
 POSITIONS = ("GK", "DF", "MF", "FW")
-ATTRS = ("pace", "shooting", "passing", "defending", "physical", "goalkeeping")
 
-# How much each attribute contributes to ability in each position.
+TECHNICAL = ("finishing", "dribbling", "passing", "crossing", "tackling", "heading")
+MENTAL = ("vision", "positioning", "composure", "work_rate")
+PHYSICAL = ("pace", "stamina", "strength")
+KEEPING = ("reflexes", "handling", "aerial", "kicking")
+ATTRS = TECHNICAL + MENTAL + PHYSICAL + KEEPING
+
+ATTR_GROUPS = {"Technical": TECHNICAL, "Mental": MENTAL,
+               "Physical": PHYSICAL, "Keeping": KEEPING}
+
+# How much each attribute contributes to overall ability in each position.
+# Each mapping sums to 1.0; unlisted attributes don't affect the rating.
 POS_WEIGHTS = {
-    "GK": {"goalkeeping": 0.55, "physical": 0.15, "passing": 0.10, "defending": 0.10, "pace": 0.05, "shooting": 0.05},
-    "DF": {"defending": 0.40, "physical": 0.25, "pace": 0.15, "passing": 0.15, "shooting": 0.03, "goalkeeping": 0.02},
-    "MF": {"passing": 0.40, "physical": 0.20, "pace": 0.15, "shooting": 0.15, "defending": 0.08, "goalkeeping": 0.02},
-    "FW": {"shooting": 0.40, "pace": 0.25, "physical": 0.15, "passing": 0.15, "defending": 0.03, "goalkeeping": 0.02},
+    "GK": {"reflexes": 0.26, "handling": 0.20, "aerial": 0.13, "kicking": 0.07,
+           "positioning": 0.10, "composure": 0.07, "strength": 0.05,
+           "pace": 0.03, "passing": 0.05, "vision": 0.04},
+    "DF": {"tackling": 0.22, "positioning": 0.18, "heading": 0.13,
+           "strength": 0.13, "pace": 0.12, "passing": 0.08, "composure": 0.06,
+           "work_rate": 0.06, "vision": 0.02},
+    "MF": {"passing": 0.20, "vision": 0.16, "work_rate": 0.12, "stamina": 0.10,
+           "dribbling": 0.10, "composure": 0.08, "positioning": 0.08,
+           "finishing": 0.06, "tackling": 0.06, "pace": 0.04},
+    "FW": {"finishing": 0.24, "pace": 0.16, "dribbling": 0.14, "composure": 0.12,
+           "heading": 0.08, "strength": 0.08, "vision": 0.06, "passing": 0.06,
+           "work_rate": 0.06},
 }
 
 PEAK_AGE = {"GK": 30, "DF": 28, "MF": 27, "FW": 26}
@@ -23,6 +51,20 @@ PEAK_AGE = {"GK": 30, "DF": 28, "MF": 27, "FW": 26}
 def _blank_stats() -> dict:
     return {"apps": 0, "goals": 0, "assists": 0, "yellows": 0, "reds": 0,
             "clean_sheets": 0, "rating_sum": 0.0}
+
+
+def migrate_attrs(old: dict) -> dict:
+    """Convert the legacy six-attribute format to the detailed system."""
+    sho, pas, dfn = old["shooting"], old["passing"], old["defending"]
+    phy, pac, gkp = old["physical"], old["pace"], old["goalkeeping"]
+    return {
+        "finishing": sho, "dribbling": (pac + sho) / 2, "passing": pas,
+        "crossing": pas * 0.9, "tackling": dfn, "heading": (phy + dfn) / 2,
+        "vision": pas, "positioning": dfn, "composure": (sho + pas) / 2,
+        "work_rate": phy, "pace": pac, "stamina": phy, "strength": phy,
+        "reflexes": gkp, "handling": gkp, "aerial": gkp * 0.9,
+        "kicking": (gkp + pas) / 2,
+    }
 
 
 class Player:
@@ -57,7 +99,7 @@ class Player:
 
     def rating_at(self, position: str) -> float:
         w = POS_WEIGHTS[position]
-        score = sum(self.attrs[a] * w[a] for a in ATTRS)
+        score = sum(self.attrs[a] * wt for a, wt in w.items())
         if position != self.position:
             score *= 0.72  # out-of-position penalty
         return score
@@ -111,9 +153,19 @@ class Player:
     def _apply_growth(self, rng: random.Random, growth: float) -> None:
         w = POS_WEIGHTS[self.position]
         for a in ATTRS:
-            delta = growth * (0.5 + 1.6 * w[a]) + rng.uniform(-0.4, 0.4)
-            if growth < 0 and a == "pace":
-                delta *= 1.5  # legs go first
+            delta = growth * (0.5 + 1.6 * w.get(a, 0.02)) + rng.uniform(-0.4, 0.4)
+            if growth < 0:
+                # Ageing profile: legs go first, the brain keeps its edge.
+                if a == "pace":
+                    delta *= 1.9
+                elif a in PHYSICAL:
+                    delta *= 1.6
+                elif a in MENTAL:
+                    delta *= 0.35
+                elif a in KEEPING:
+                    delta *= 0.6
+                else:
+                    delta *= 0.85
             self.attrs[a] = min(99.0, max(1.0, self.attrs[a] + delta))
 
     def age_one_year(self) -> None:
@@ -147,8 +199,11 @@ class Player:
 
     @classmethod
     def from_dict(cls, d: dict) -> "Player":
+        attrs = d["attrs"]
+        if "shooting" in attrs:          # legacy six-attribute save
+            attrs = migrate_attrs(attrs)
         p = cls(d["id"], d["name"], d["nation"], d["position"], d["age"],
-                d["attrs"], d["potential"])
+                attrs, d["potential"])
         p.fitness = d["fitness"]
         p.morale = d["morale"]
         p.injured_for = d["injured_for"]
@@ -168,14 +223,19 @@ def generate_player(rng: random.Random, pid: int, position: str, age: int,
     """Create a player whose weighted ability lands near ``target_ability``."""
     name, nation = random_identity(rng)
     target = max(25.0, min(96.0, target_ability + rng.uniform(-4, 4)))
-    w = POS_WEIGHTS[position]
+    weights = POS_WEIGHTS[position]
+    avg_w = 1.0 / len(weights)
     attrs = {}
     for a in ATTRS:
-        # Attributes central to the position sit above target, fringe ones below.
-        skew = (w[a] - 1 / len(ATTRS)) * 55
-        attrs[a] = min(99.0, max(1.0, target + skew + rng.uniform(-7, 7)))
-    if position != "GK":
-        attrs["goalkeeping"] = rng.uniform(5, 15)
+        w = weights.get(a)
+        if position != "GK" and a in KEEPING:
+            attrs[a] = rng.uniform(3, 12)
+        elif w is None:
+            # Off-profile skills sit well below the player's level.
+            attrs[a] = min(99.0, max(1.0, target - rng.uniform(10, 28)))
+        else:
+            skew = (w - avg_w) * 110
+            attrs[a] = min(99.0, max(1.0, target + skew + rng.uniform(-7, 7)))
     p = Player(pid, name, nation, position, age, attrs, potential=0)
     ca = p.ability
     if age < 24:

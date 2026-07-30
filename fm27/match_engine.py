@@ -83,13 +83,20 @@ def _team_strengths(club: Club, slots: list[tuple[str, Player]]) -> tuple[float,
     for pos, p in slots:
         penalty = 1.0 if p.position == pos else 0.78
         if pos == "GK":
-            gk_s = _unit_strength(p, {"goalkeeping": 0.8, "physical": 0.2}) * penalty
+            gk_s = _unit_strength(p, {"reflexes": 0.45, "handling": 0.30,
+                                      "aerial": 0.15, "positioning": 0.10}) * penalty
         elif pos == "DF":
-            df_s.append(_unit_strength(p, {"defending": 0.55, "physical": 0.25, "pace": 0.20}) * penalty)
+            df_s.append(_unit_strength(p, {"tackling": 0.30, "positioning": 0.25,
+                                           "strength": 0.15, "pace": 0.15,
+                                           "heading": 0.15}) * penalty)
         elif pos == "MF":
-            mf_s.append(_unit_strength(p, {"passing": 0.5, "physical": 0.2, "pace": 0.15, "shooting": 0.15}) * penalty)
+            mf_s.append(_unit_strength(p, {"passing": 0.28, "vision": 0.20,
+                                           "work_rate": 0.14, "dribbling": 0.14,
+                                           "stamina": 0.12, "composure": 0.12}) * penalty)
         else:
-            fw_s.append(_unit_strength(p, {"shooting": 0.5, "pace": 0.3, "physical": 0.2}) * penalty)
+            fw_s.append(_unit_strength(p, {"finishing": 0.32, "pace": 0.20,
+                                           "dribbling": 0.16, "composure": 0.14,
+                                           "heading": 0.10, "strength": 0.08}) * penalty)
     df_avg = sum(df_s) / len(df_s) if df_s else 30.0
     mf_avg = sum(mf_s) / len(mf_s) if mf_s else 30.0
     fw_avg = sum(fw_s) / len(fw_s) if fw_s else mf_avg * 0.8
@@ -110,15 +117,22 @@ def _expected_goals(attack: float, opp_defence: float, mid: float, opp_mid: floa
 
 
 def _pick_scorer(rng: random.Random, slots: list[tuple[str, Player]]) -> tuple[Player, Player | None]:
-    """Weighted scorer + optional assister from the outfield players."""
+    """Weighted scorer + optional assister from the outfield players.
+
+    The steep exponent concentrates goals on elite finishers — a 95-finishing
+    striker takes a much bigger share than an 75-rated teammate.
+    """
     outfield = [(pos, p) for pos, p in slots if pos != "GK"]
     pos_bias = {"DF": 0.35, "MF": 1.0, "FW": 2.7}
-    weights = [max(1.0, p.attrs["shooting"]) ** 1.5 * pos_bias[pos] for pos, p in outfield]
+    weights = [max(1.0, p.attrs["finishing"] * 0.6 + p.attrs["composure"] * 0.25
+                   + p.attrs["heading"] * 0.15) ** 2.6 * pos_bias[pos]
+               for pos, p in outfield]
     scorer = rng.choices([p for _, p in outfield], weights=weights)[0]
     assister = None
     if rng.random() < 0.72:
         others = [(pos, p) for pos, p in outfield if p is not scorer]
-        a_weights = [max(1.0, p.attrs["passing"]) ** 2 * {"DF": 0.5, "MF": 2.2, "FW": 1.2}[pos]
+        a_weights = [max(1.0, p.attrs["passing"] * 0.5 + p.attrs["vision"] * 0.5) ** 2
+                     * {"DF": 0.5, "MF": 2.2, "FW": 1.2}[pos]
                      for pos, p in others]
         assister = rng.choices([p for _, p in others], weights=a_weights)[0]
     return scorer, assister
@@ -188,7 +202,7 @@ def _resolve_knockout_draw(rng: random.Random, report: MatchReport,
     # Penalty shootout: keeper quality tilts the coin.
     h_gk = next(p for pos, p in h_slots if pos == "GK")
     a_gk = next(p for pos, p in a_slots if pos == "GK")
-    edge = 0.5 + (h_gk.attrs["goalkeeping"] - a_gk.attrs["goalkeeping"]) / 400.0
+    edge = 0.5 + (h_gk.attrs["reflexes"] - a_gk.attrs["reflexes"]) / 400.0
     home_won = rng.random() < edge
     win_pens = rng.choice([(5, 4), (4, 3), (4, 2), (5, 3), (3, 1), (6, 5)])
     report.penalties = win_pens if home_won else (win_pens[1], win_pens[0])
@@ -199,7 +213,7 @@ def _add_discipline_and_injuries(rng: random.Random, report: MatchReport,
                                  all_slots: list[tuple[str, Player]]) -> None:
     for pos, p in all_slots:
         club_id = p.club_id
-        aggression = p.attrs["physical"] / 100.0
+        aggression = p.attrs["strength"] / 100.0
         if rng.random() < 0.035 + 0.05 * aggression:
             p.season["yellows"] += 1
             report.events.append({"minute": rng.randint(10, 90), "type": "yellow",
@@ -256,5 +270,7 @@ def _apply_player_updates(report: MatchReport, home: Club, h_slots,
         for _, p in slots:
             p.season["apps"] += 1
             p.season["rating_sum"] += report.ratings.get(p.id, 6.0)
-            p.fitness = max(20.0, p.fitness - 13.0 * minutes_factor)
+            # High-stamina players shrug off a match; low-stamina ones drain.
+            cost = 16.0 - p.attrs["stamina"] * 0.06
+            p.fitness = max(20.0, p.fitness - cost * minutes_factor)
             p.morale = max(5.0, min(100.0, p.morale + morale_delta))

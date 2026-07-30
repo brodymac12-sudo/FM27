@@ -39,8 +39,20 @@ python -m fm27 --sim 10 --load saves/world.json --save-to world
   clean sheets, and per-player match ratings
 
 **Squads & players**
-- Six-attribute players (pace, shooting, passing, defending, physical,
-  goalkeeping) with hidden potential, growth curves, and age-related decline
+- 17 attributes per player across four groups — Technical (finishing,
+  dribbling, passing, crossing, tackling, heading), Mental (vision,
+  positioning, composure, work rate), Physical (pace, stamina, strength),
+  and Keeping (reflexes, handling, aerial, kicking) — blended into a
+  position-weighted overall rating
+- Ageing with a realistic profile: pace and stamina fade first, mental
+  attributes barely decline; hidden potential drives youth growth curves
+- Team selection always fields the strongest available XI in their natural
+  positions — a tired star still starts, and a 99-rated striker is never
+  repurposed to patch a weak back line. Elite finishers dominate their
+  team's goal share like real ones do
+- The league's overall quality is anchored: as veterans retire and regens
+  arrive, average ability stays level across decades instead of inflating —
+  eras of great players are followed by leaner ones
 - Youth intake every season, retirements, squad-size discipline, and
   multi-decade career records
 - Six formations and three mentalities that genuinely change how matches play
@@ -115,7 +127,8 @@ loaning them, is how small clubs climb.
 python -m unittest discover -s tests
 ```
 
-22 tests cover scheduling correctness, match-engine sanity (home advantage,
+28 tests cover scheduling correctness, match-engine sanity (home advantage,
 strength ordering), full-season and multi-year invariants, loan and
-transfer integrity, the scouting pipeline, the editor, and deterministic
-save/load round-trips.
+transfer integrity, the scouting pipeline, the editor, star-player
+selection and scoring, league-quality stability, legacy-save migration,
+and deterministic save/load round-trips.

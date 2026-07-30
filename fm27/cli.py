@@ -5,7 +5,7 @@ from __future__ import annotations
 from . import data, editor, records
 from .club import FORMATIONS, MENTALITIES, Club
 from .match_engine import MatchReport
-from .player import ATTRS
+from .player import ATTRS, ATTR_GROUPS
 from .save import list_saves, load_world, save_world
 from .transfers import (ai_offer_for, execute_loan, execute_transfer,
                         find_loan_host, loan_prospects, loans_in_count,
@@ -51,6 +51,36 @@ def ask_float(prompt: str, lo: float, hi: float, default: float | None = None) -
 
 
 # ---------------------------------------------------------------- formatting
+
+ATTR_SHORT = {"finishing": "FIN", "dribbling": "DRI", "passing": "PAS",
+              "crossing": "CRO", "tackling": "TAC", "heading": "HEA",
+              "vision": "VIS", "positioning": "POS", "composure": "COM",
+              "work_rate": "WRK", "pace": "PAC", "stamina": "STA",
+              "strength": "STR", "reflexes": "REF", "handling": "HAN",
+              "aerial": "AER", "kicking": "KIC"}
+
+
+def print_attr_sheet(attrs: dict, indent: str = "  ") -> None:
+    for group, names in ATTR_GROUPS.items():
+        row = "  ".join(f"{ATTR_SHORT[a]} {attrs[a]:>2.0f}" for a in names)
+        print(f"{indent}{group:<10} {row}")
+
+
+def player_sheet(world: GameWorld, p) -> None:
+    holder = world.clubs.get(p.club_id)
+    where = f" — {holder.name}" if holder else ""
+    loan = (f" (on loan from {world.clubs[p.loaned_from].name})"
+            if p.loaned_from is not None else "")
+    print(f"\n  {p.name} — {p.position}, {p.age}, {p.nation}{where}{loan}")
+    print(f"  Overall {p.ability:.0f} | Potential {pot_band(p)} | "
+          f"Value £{p.value:.1f}M | Wage £{p.wage:.1f}M")
+    print(f"  Fitness {p.fitness:.0f} | Morale {p.morale:.0f} | "
+          f"This season: {p.season['apps']} apps, {p.season['goals']} goals, "
+          f"{p.season['assists']} assists")
+    print_attr_sheet(p.attrs)
+    if p.trophies:
+        print(f"  Honours: {len(p.trophies)} ({', '.join(p.trophies[-3:])})")
+
 
 def pot_band(p) -> str:
     pot = p.potential
@@ -114,6 +144,9 @@ def print_squad(world: GameWorld, club: Club) -> None:
     if out:
         print("  Out on loan: " + ", ".join(f"{p.name} (at {host.short})"
                                             for p, host in out))
+    idx = ask_int("View player # for full attributes (0 to back): ", 0, len(squad))
+    if idx:
+        player_sheet(world, squad[idx - 1])
 
 
 def describe_match(rep: MatchReport, detailed: bool) -> None:
@@ -433,8 +466,7 @@ def _print_report(rep: dict) -> None:
     print(f"  Current ability {rep['ability']:.0f} | Potential est. "
           f"{rep['potential_est']} | Value £{rep['value']:.1f}M | "
           f"Wage £{rep['wage']:.1f}M")
-    attrs = rep["attrs"]
-    print("  " + "  ".join(f"{k[:4].upper()} {v}" for k, v in attrs.items()))
+    print_attr_sheet(rep["attrs"])
 
 
 def _scout_reports_view(world: GameWorld) -> None:
@@ -502,9 +534,8 @@ def editor_menu(world: GameWorld) -> None:
         elif c == 3:
             print("  " + editor.set_position(player, ask("Position (GK/DF/MF/FW): ")))
         elif c == 4:
-            print("  Attributes: " + "  ".join(
-                f"{a}={player.attrs[a]:.0f}" for a in ATTRS))
-            attr = ask("Which attribute: ").lower()
+            print_attr_sheet(player.attrs)
+            attr = ask("Which attribute (full name, e.g. finishing): ").lower()
             if attr not in ATTRS:
                 print("  Unknown attribute.")
                 continue

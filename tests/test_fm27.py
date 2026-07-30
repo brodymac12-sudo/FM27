@@ -8,8 +8,22 @@ from fm27 import data, editor
 from fm27.club import FORMATIONS
 from fm27.competition import Cup, round_robin_rounds
 from fm27.match_engine import simulate_match
-from fm27.player import generate_player
+from fm27.player import ATTRS, Player, generate_player, migrate_attrs
 from fm27.world import GameWorld
+
+
+def plant_star(world, club_id):
+    """Turn a club's best forward into a 99-rated superstar."""
+    club = world.clubs[club_id]
+    star = max((p for p in club.squad if p.position == "FW"),
+               key=lambda p: p.ability)
+    for a in star.attrs:
+        star.attrs[a] = 90.0
+    for a in ("finishing", "composure", "pace", "dribbling", "heading"):
+        star.attrs[a] = 99.0
+    star.age = 25
+    star.potential = 99
+    return star
 
 
 class TestScheduling(unittest.TestCase):
@@ -299,6 +313,83 @@ class TestWindowsAndScouting(unittest.TestCase):
         self.assertIn(target.id, clone.scout_reports)   # int keys restored
 
 
+class TestStarPlayers(unittest.TestCase):
+    def test_star_striker_plays_and_scores(self):
+        # A 99-OVR forward at a modest club must start almost every game and
+        # rack up an elite goal tally (regression: greedy slot-filling used
+        # to field him as a defender; weak scorer weighting starved his tally).
+        world = GameWorld.new(seed=12)
+        star = plant_star(world, 30)
+        world.simulate_rest_of_season()
+        self.assertGreaterEqual(star.career["apps"], 35)
+        self.assertGreaterEqual(star.career["goals"], 30)
+
+    def test_star_keeps_natural_position(self):
+        # Even in a defender-heavy formation at a weak club, an elite forward
+        # is picked as a forward — never repurposed to patch the back line.
+        world = GameWorld.new(seed=11)
+        club = world.clubs[20]
+        star = plant_star(world, 20)
+        club.tactics.formation = "5-3-2"
+        xi = club.pick_lineup()
+        self.assertIn(star, xi)
+        slots = club.lineup_positions(xi)
+        slot = next(pos for pos, p in slots if p.id == star.id)
+        self.assertEqual(slot, "FW")
+
+    def test_best_players_start_across_the_league(self):
+        world = GameWorld.new(seed=13)
+        for club in world.clubs.values():
+            xi = set(club.pick_lineup())
+            for pos in ("GK", "DF", "MF", "FW"):
+                group = sorted(club.players_at(pos), key=lambda p: -p.ability)
+                if group and group[0].available:
+                    self.assertIn(group[0], xi,
+                                  f"{club.name}: best fit {pos} not starting")
+
+
+class TestLeagueQuality(unittest.TestCase):
+    def test_average_ability_does_not_inflate(self):
+        world = GameWorld.new(seed=99)
+        baseline = world.baseline_ca
+        world.simulate_years(10)
+        drift = world._avg_ability() - baseline
+        self.assertLess(abs(drift), 4.0)
+        # Turnover keeps happening: new blood arrives as veterans leave.
+        self.assertGreater(len(world.retired), 300)
+        self.assertGreater(world.next_pid, 44 * 23 + 500)
+
+
+class TestAttributeSystem(unittest.TestCase):
+    def test_seventeen_attributes(self):
+        world = GameWorld.new(seed=3)
+        p = world.clubs[1].squad[0]
+        self.assertEqual(set(p.attrs), set(ATTRS))
+        self.assertEqual(len(ATTRS), 17)
+
+    def test_legacy_save_migration(self):
+        old = {"pace": 80, "shooting": 85, "passing": 70, "defending": 40,
+               "physical": 75, "goalkeeping": 10}
+        attrs = migrate_attrs(old)
+        self.assertEqual(set(attrs), set(ATTRS))
+        self.assertEqual(attrs["finishing"], 85)
+        self.assertEqual(attrs["pace"], 80)
+        self.assertEqual(attrs["reflexes"], 10)
+        d = {"id": 1, "name": "Old Timer", "nation": "England",
+             "position": "FW", "age": 28, "attrs": old, "potential": 88,
+             "fitness": 90.0, "morale": 70.0, "injured_for": 0,
+             "suspended_for": 0, "season": {"apps": 0, "goals": 0, "assists": 0,
+                                            "yellows": 0, "reds": 0,
+                                            "clean_sheets": 0, "rating_sum": 0.0},
+             "career": {"apps": 100, "goals": 50, "assists": 20, "yellows": 5,
+                        "reds": 0, "clean_sheets": 0, "rating_sum": 700.0,
+                        "seasons": 5},
+             "trophies": [], "club_id": 1}
+        p = Player.from_dict(d)
+        self.assertIn("finishing", p.attrs)
+        self.assertGreater(p.ability, 60)
+
+
 class TestEditor(unittest.TestCase):
     def setUp(self):
         self.world = GameWorld.new(seed=47)
@@ -309,8 +400,8 @@ class TestEditor(unittest.TestCase):
         self.assertTrue(any(p.id == player.id for p, _ in hits))
         editor.set_name(player, "Test Legend")
         self.assertEqual(player.name, "Test Legend")
-        editor.set_attribute(player, "shooting", 150)   # clamped
-        self.assertEqual(player.attrs["shooting"], 99.0)
+        editor.set_attribute(player, "finishing", 150)   # clamped
+        self.assertEqual(player.attrs["finishing"], 99.0)
         editor.set_position(player, "fw")
         self.assertEqual(player.position, "FW")
         editor.set_potential(player, 1)                 # can't go below ability
