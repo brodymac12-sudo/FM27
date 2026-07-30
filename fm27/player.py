@@ -89,6 +89,8 @@ class Player:
         self.trophies: list[str] = []
         self.club_id: int | None = None
         self.loaned_from: int | None = None   # parent club id while on loan
+        self.contract_years = 3               # seasons left on current deal
+        self.training_focus: str | None = None  # ATTR_GROUPS key or None
 
     # ------------------------------------------------------------------ rating
 
@@ -124,6 +126,8 @@ class Player:
         else:
             age_f = max(0.12, 1.0 - 0.16 * (self.age - peak))
             base *= age_f
+        # A player running down his deal goes for much less.
+        base *= 0.75 + 0.09 * min(3, max(0, self.contract_years))
         return round(max(0.05, base), 2)
 
     @property
@@ -152,8 +156,11 @@ class Player:
 
     def _apply_growth(self, rng: random.Random, growth: float) -> None:
         w = POS_WEIGHTS[self.position]
+        focus_group = ATTR_GROUPS.get(self.training_focus or "")
         for a in ATTRS:
             delta = growth * (0.5 + 1.6 * w.get(a, 0.02)) + rng.uniform(-0.4, 0.4)
+            if growth > 0 and focus_group:
+                delta *= 1.45 if a in focus_group else 0.88
             if growth < 0:
                 # Ageing profile: legs go first, the brain keeps its edge.
                 if a == "pace":
@@ -195,6 +202,8 @@ class Player:
             "suspended_for": self.suspended_for, "season": self.season,
             "career": self.career, "trophies": self.trophies,
             "club_id": self.club_id, "loaned_from": self.loaned_from,
+            "contract_years": self.contract_years,
+            "training_focus": self.training_focus,
         }
 
     @classmethod
@@ -213,6 +222,8 @@ class Player:
         p.trophies = d["trophies"]
         p.club_id = d["club_id"]
         p.loaned_from = d.get("loaned_from")
+        p.contract_years = d.get("contract_years", 3)
+        p.training_focus = d.get("training_focus")
         return p
 
 

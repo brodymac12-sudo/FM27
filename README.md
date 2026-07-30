@@ -70,6 +70,25 @@ python -m fm27 --sim 10 --load saves/world.json --save-to world
 - Sell players by fielding AI offers; every deal respects budgets, wage
   rooms, and squad-depth rules
 
+**Contracts & free agency**
+- Every player is on a contract that runs down each season; expiring players
+  walk for free unless you offer a new deal from the Contracts screen, and
+  a player running down his deal is worth far less on the market
+- AI clubs renew the players they want and release the rest into a
+  free-agent pool you (and they) can sign from for wages only
+
+**The dugout is a hot seat**
+- Board confidence tracks every result against expectations set by your
+  club's stature — finish above your means and it soars, slump and the
+  axe falls, mid-season or at the year-end review
+- Get sacked and you'll field job offers from clubs willing to take a
+  chance on you, or walk away; your managerial career history is tracked
+  across every stint
+- Prefer a quiet life? Enable **job security** at career start (or toggle
+  it on the Club page) and the board can never fire you
+- Set a per-player **training focus** (Technical / Mental / Physical /
+  Keeping) to steer how your youngsters develop
+
 **In-game editor**
 - Edit any player in the world at any time: name, age, position, every
   attribute, potential, fitness/morale, instant injury healing — or move a
@@ -82,6 +101,9 @@ python -m fm27 --sim 10 --load saves/world.json --save-to world
 
 **Multi-year simulation**
 - Simulate 1–200 seasons in one command, in-career or as a spectator
+- While simming, your assistant can run your club's transfers, loans,
+  free-agent signings, and contract renewals (autopilot) — or leave the
+  squad untouched if you'd rather handle every deal yourself
 - Season-by-season history: champions, cup winners, golden boots,
   players of the season, promotions and relegations
 - All-time records: top scorers, most decorated players, club honours
@@ -127,8 +149,9 @@ loaning them, is how small clubs climb.
 python -m unittest discover -s tests
 ```
 
-28 tests cover scheduling correctness, match-engine sanity (home advantage,
-strength ordering), full-season and multi-year invariants, loan and
-transfer integrity, the scouting pipeline, the editor, star-player
-selection and scoring, league-quality stability, legacy-save migration,
-and deterministic save/load round-trips.
+36 tests cover scheduling correctness, match-engine sanity (home advantage,
+strength ordering), full-season and multi-year invariants, loan, transfer,
+contract, and free-agency integrity, board confidence and sackings (and the
+unsackable mode), autopilot squad management, training focus, the scouting
+pipeline, the editor, star-player selection and scoring, league-quality
+stability, legacy-save migration, and deterministic save/load round-trips.

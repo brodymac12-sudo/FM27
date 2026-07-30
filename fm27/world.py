@@ -16,10 +16,17 @@ from .club import Club, FORMATIONS, build_initial_squad
 from .competition import Cup, League, Playoff
 from .match_engine import MatchReport
 from .player import Player, generate_player
-from .transfers import MIN_DEPTH, run_ai_loans, run_ai_window
+from .transfers import (MIN_DEPTH, run_ai_loans, run_ai_window,
+                        run_free_agent_signings)
 
 SQUAD_CAP = 28          # clubs release surplus players beyond this
 JAN_WINDOW_LENGTH = 5   # calendar events the mid-season window stays open
+
+
+def _ord(n: int) -> str:
+    if 10 <= n % 100 <= 20:
+        return "th"
+    return {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
 
 
 class GameWorld:
@@ -44,7 +51,15 @@ class GameWorld:
         self.records: dict = {"biggest_win": None, "best_season_points": None,
                               "most_goals_in_season": None}
         self.last_window_transfers: list[str] = []
-        self.baseline_ca = 0.0   # league-quality anchor set at world creation
+        self.baseline_ca = 0.0   # founding population-average ability (informational)
+        self.baseline_xi = 0.0   # founding average starting-XI strength — the anchor
+        self.free_agents: list[Player] = []
+        self.user_confidence = 70.0   # board confidence in the user, 0-100
+        self.pending_sack = False
+        self.sack_reason = ""
+        self.manager_stints: list[dict] = []
+        self.unsackable = False       # job-security mode: the board never fires you
+        self.autopilot = False        # assistant manages the user club's market moves
 
     # ------------------------------------------------------------- world setup
 
@@ -60,12 +75,17 @@ class GameWorld:
                 world.clubs[cid] = club
                 cid += 1
         world.baseline_ca = world._avg_ability()
+        world.baseline_xi = world._avg_xi_strength()
         world._start_season(first=True)
         return world
 
     def _avg_ability(self) -> float:
         players = [p for c in self.clubs.values() for p in c.squad]
         return sum(p.ability for p in players) / max(1, len(players))
+
+    def _avg_xi_strength(self) -> float:
+        """Average best-XI ability across the league — the quality the fan sees."""
+        return sum(c.squad_strength for c in self.clubs.values()) / max(1, len(self.clubs))
 
     def _take_pid(self) -> int:
         pid = self.next_pid
@@ -80,6 +100,69 @@ class GameWorld:
     def user_club(self) -> Club | None:
         return self.clubs.get(self.user_club_id) if self.user_club_id else None
 
+    # ------------------------------------------------------------- the manager
+
+    def start_career(self, club_id: int, manager_name: str) -> None:
+        self.user_club_id = club_id
+        self.manager_name = manager_name
+        self.user_confidence = 70.0
+        self.pending_sack = False
+        self.manager_stints.append({"club": self.clubs[club_id].name,
+                                    "from": self.season_label, "to": None,
+                                    "reason": None})
+
+    def job_offers(self) -> list[Club]:
+        """Clubs willing to hire a just-sacked manager."""
+        old = self.user_club
+        pool = [c for c in self.clubs.values()
+                if c.id != (old.id if old else None)
+                and c.reputation <= (old.reputation + 3 if old else 100)]
+        pool.sort(key=lambda c: -c.reputation)
+        picks = pool[:8]
+        self.rng.shuffle(picks)
+        return sorted(picks[:3], key=lambda c: -c.reputation)
+
+    def accept_job(self, club_id: int) -> None:
+        if self.manager_stints:
+            self.manager_stints[-1]["to"] = self.season_label
+            self.manager_stints[-1]["reason"] = "sacked"
+        self.user_club_id = club_id
+        self.user_confidence = 60.0
+        self.pending_sack = False
+        self.sack_reason = ""
+        self.manager_stints.append({"club": self.clubs[club_id].name,
+                                    "from": self.season_label, "to": None,
+                                    "reason": None})
+
+    def retire_manager(self) -> None:
+        if self.manager_stints:
+            self.manager_stints[-1]["to"] = self.season_label
+            self.manager_stints[-1]["reason"] = "sacked"
+        self.user_club_id = None
+        self.pending_sack = False
+
+    @property
+    def _managed_exclusion(self) -> int | None:
+        """Which club the AI market logic must leave alone.
+
+        On autopilot the assistant manages the user's club like any AI club,
+        so nothing is excluded.
+        """
+        return None if self.autopilot else self.user_club_id
+
+    def _update_confidence(self, report: MatchReport, round_idx: int) -> None:
+        user = self.user_club
+        opp = report.away if report.home.id == user.id else report.home
+        rep_diff = user.reputation - opp.reputation
+        expected = min(2.6, max(0.4, 1.35 + rep_diff * 0.035))
+        pts = {"W": 3, "D": 1, "L": 0}[report.result_for(user.id)]
+        self.user_confidence = min(100.0, max(0.0, self.user_confidence
+                                              + (pts - expected) * 1.2))
+        if self.user_confidence <= 12 and round_idx >= 10 and not self.unsackable:
+            self.pending_sack = True
+            self.sack_reason = ("results have fallen far below what the board "
+                                "expects — you have been relieved of your duties")
+
     def division_clubs(self, tier: int) -> list[Club]:
         return [c for c in self.clubs.values() if c.division == tier]
 
@@ -91,11 +174,15 @@ class GameWorld:
 
     def _start_season(self, first: bool = False) -> None:
         news: list[str] = []
+        excl = self._managed_exclusion
         if not first:
             news += [str(t) for t in run_ai_window(self.rng, list(self.clubs.values()),
-                                                   self.user_club_id)]
-        news += run_ai_loans(self.rng, list(self.clubs.values()), self.user_club_id)
+                                                   excl)]
+            news += run_free_agent_signings(self.rng, list(self.clubs.values()),
+                                            self.free_agents, excl)
+        news += run_ai_loans(self.rng, list(self.clubs.values()), excl)
         self.last_window_transfers = news
+        self.user_confidence = min(88.0, max(45.0, self.user_confidence))
         self.leagues = []
         for tier, name in enumerate(data.DIVISION_NAMES):
             league = League(name, tier, [c.id for c in self.division_clubs(tier)])
@@ -166,11 +253,14 @@ class GameWorld:
         (the next season is started automatically).
         """
         if self.calendar_pos == self.mid_window_start:
-            # January: a quieter AI window, plus loan moves.
+            # January: a quieter AI window, plus loan moves and free agents.
+            excl = self._managed_exclusion
             deals = [str(t) for t in run_ai_window(
-                self.rng, list(self.clubs.values()), self.user_club_id, max_buys=1)]
+                self.rng, list(self.clubs.values()), excl, max_buys=1)]
+            deals += run_free_agent_signings(self.rng, list(self.clubs.values()),
+                                             self.free_agents, excl)
             deals += run_ai_loans(self.rng, list(self.clubs.values()),
-                                  self.user_club_id, max_out=1)
+                                  excl, max_out=1)
             self.last_window_transfers = deals + self.last_window_transfers
         ev = self.calendar[self.calendar_pos]
         if ev["type"] == "league":
@@ -184,6 +274,12 @@ class GameWorld:
         else:
             reports = [self.playoff.play_final(self.rng, self.clubs)]
         self.calendar_pos += 1
+        if (self.user_club_id is not None and ev["type"] == "league"
+                and not self.pending_sack):
+            user_rep = next((r for r in reports
+                             if self.user_club_id in (r.home.id, r.away.id)), None)
+            if user_rep is not None:
+                self._update_confidence(user_rep, ev["round"])
         self._track_records(reports)
         self._post_event_recovery({r.home.id for r in reports} | {r.away.id for r in reports})
         completed = self._complete_scout_reports()
@@ -315,11 +411,14 @@ class GameWorld:
                 "season": label}
 
         summary["awards"] = self._season_awards(label)
+        if self.user_club is not None:
+            self._board_verdict(tables, summary)
         self._promotion_relegation(tables, summary)
         self._settle_finances(tables)
         self._develop_and_age()      # loanees develop on their loan-club minutes
         self._return_loans()
         summary["retired"] = self._process_retirements()
+        summary["contract_news"] = self._process_contracts()
         self._youth_intake()
         summary["released"] = self._trim_squads()
         self.shortlist = [pid for pid in self.shortlist if self.find_player(pid)[0]]
@@ -329,6 +428,60 @@ class GameWorld:
             summary["user_division"] = data.DIVISION_NAMES[self.user_club.division]
         self.history.append(summary)
         return summary
+
+    def _board_verdict(self, tables: list[list[dict]], summary: dict) -> None:
+        """Season-end board review: finish vs. expectation, silverware bonus."""
+        user = self.user_club
+        table = tables[user.division]
+        actual = next(i for i, row in enumerate(table, start=1)
+                      if row["club_id"] == user.id)
+        reps = sorted((c.reputation for c in self.division_clubs(user.division)),
+                      reverse=True)
+        expected = reps.index(user.reputation) + 1
+        delta = max(-20.0, min(20.0, (expected - actual) * 3.0))
+        if actual == 1:
+            delta += 20
+        if summary["cup_winner"] == user.name:
+            delta += 12
+        self.user_confidence = min(100.0, max(0.0, self.user_confidence + delta))
+        summary["board"] = {"expected": expected, "actual": actual,
+                            "confidence": round(self.user_confidence)}
+        if self.user_confidence <= 25 and not self.unsackable:
+            self.pending_sack = True
+            self.sack_reason = (f"a {actual}{_ord(actual)}-place finish against an "
+                                f"expectation of {expected}{_ord(expected)} was the "
+                                "final straw — the board has dismissed you")
+
+    def _process_contracts(self) -> list[str]:
+        """Run down every deal a year; AI clubs renew keepers, release the rest.
+
+        Unrenewed user-club players walk at expiry. Released players spend a
+        season in the free-agent pool before drifting out of the game.
+        """
+        news: list[str] = []
+        released: list[Player] = []
+        for club in self.clubs.values():
+            for p in list(club.squad):
+                p.contract_years -= 1
+                if p.contract_years > 0:
+                    continue
+                if club.id == self.user_club_id and not self.autopilot:
+                    club.remove_player(p)
+                    released.append(p)
+                    news.append(f"{p.name} left {club.name} on a free — "
+                                "his contract expired unrenewed")
+                    continue
+                wants = (p.ability >= club.squad_strength - 9
+                         or (p.age < 23 and p.potential >= club.squad_strength))
+                affordable = club.wage_bill <= club.wage_budget * 1.05
+                if wants and affordable:
+                    p.contract_years = 2 if p.age >= 29 else self.rng.randint(3, 4)
+                else:
+                    club.remove_player(p)
+                    released.append(p)
+        # Fresh pool each season: last year's unsigned free agents move on.
+        self.free_agents = released
+        return news[:6]
 
     def _award_squad_trophy(self, club: Club, title: str) -> None:
         for p in club.squad:
@@ -445,11 +598,12 @@ class GameWorld:
         return notes[:8]
 
     def _youth_intake(self) -> None:
-        # Negative feedback keeps the league's overall quality stationary:
-        # if the world has drifted above its founding level, the next crop of
-        # regens comes in weaker (and vice versa), so eras of great players
-        # are followed by leaner ones instead of endless inflation.
-        correction = max(-8.0, min(8.0, self.baseline_ca - self._avg_ability()))
+        # Negative feedback keeps the league's on-pitch quality stationary:
+        # if starting XIs have drifted above their founding level, the next
+        # crop of regens comes in weaker (and vice versa), so eras of great
+        # players are followed by leaner ones instead of endless inflation.
+        correction = max(-12.0, min(12.0,
+                                    1.6 * (self.baseline_xi - self._avg_xi_strength())))
         for club in self.clubs.values():
             for _ in range(self.rng.randint(3, 4)):
                 pos = self.rng.choices(["GK", "DF", "MF", "FW"],
@@ -460,6 +614,7 @@ class GameWorld:
                 youth.potential = int(min(97, max(
                     youth.potential,
                     club.reputation + correction + self.rng.uniform(-12, 10))))
+                youth.contract_years = self.rng.randint(3, 5)
                 club.add_player(youth)
             # Emergency depth so a selling club can always field a team.
             while len(club.squad) < 16:
@@ -467,6 +622,7 @@ class GameWorld:
                 filler = generate_player(self.rng, self._take_pid(), pos,
                                          self.rng.randint(19, 23),
                                          club.reputation * 0.7 + correction)
+                filler.contract_years = self.rng.randint(2, 3)
                 club.add_player(filler)
 
     def _trim_squads(self) -> dict[str, int]:
@@ -493,10 +649,16 @@ class GameWorld:
 
     # --------------------------------------------------------- bulk simulation
 
-    def simulate_rest_of_season(self) -> dict:
-        """Run every remaining event this season; returns the season summary."""
+    def simulate_rest_of_season(self) -> dict | None:
+        """Run every remaining event this season; returns the season summary.
+
+        Stops early (returning None) if the board sacks the user mid-season —
+        the career decision belongs to the player, not the simulation.
+        """
         summary = None
         while summary is None:
+            if self.pending_sack:
+                return None
             summary = self.advance()["season_summary"]
         return summary
 
@@ -504,14 +666,19 @@ class GameWorld:
         """Simulate ``n`` full seasons (finishing the current one first).
 
         ``progress`` is an optional callback receiving each season summary as
-        it completes — handy for streaming output during long sims.
+        it completes — handy for streaming output during long sims. Stops
+        early if the user is sacked along the way.
         """
         summaries = []
         for _ in range(n):
             summary = self.simulate_rest_of_season()
+            if summary is None:
+                break
             summaries.append(summary)
             if progress:
                 progress(summary)
+            if self.pending_sack:
+                break
         return summaries
 
     # ------------------------------------------------------------ serialization
@@ -539,6 +706,14 @@ class GameWorld:
             "records": self.records,
             "last_window_transfers": self.last_window_transfers,
             "baseline_ca": self.baseline_ca,
+            "baseline_xi": self.baseline_xi,
+            "free_agents": [p.to_dict() for p in self.free_agents],
+            "user_confidence": self.user_confidence,
+            "pending_sack": self.pending_sack,
+            "sack_reason": self.sack_reason,
+            "manager_stints": self.manager_stints,
+            "unsackable": self.unsackable,
+            "autopilot": self.autopilot,
             "rng_state": [state[0], list(state[1]), state[2]],
         }
 
@@ -564,6 +739,14 @@ class GameWorld:
         world.records = d["records"]
         world.last_window_transfers = d["last_window_transfers"]
         world.baseline_ca = d.get("baseline_ca") or world._avg_ability()
+        world.baseline_xi = d.get("baseline_xi") or world._avg_xi_strength()
+        world.free_agents = [Player.from_dict(pd) for pd in d.get("free_agents", [])]
+        world.user_confidence = d.get("user_confidence", 70.0)
+        world.pending_sack = d.get("pending_sack", False)
+        world.sack_reason = d.get("sack_reason", "")
+        world.manager_stints = d.get("manager_stints", [])
+        world.unsackable = d.get("unsackable", False)
+        world.autopilot = d.get("autopilot", False)
         s = d["rng_state"]
         world.rng.setstate((s[0], tuple(s[1]), s[2]))
         return world

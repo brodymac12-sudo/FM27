@@ -71,6 +71,7 @@ def execute_transfer(buyer: Club, seller: Club, player: Player, fee: float) -> T
     buyer.balance = round(buyer.balance - fee, 2)
     buyer.transfer_budget = round(buyer.transfer_budget - fee, 2)
     player.morale = min(100.0, player.morale + 8)
+    player.contract_years = 3 if player.age >= 28 else 4   # fresh deal on signing
     return Transfer(player.name, player.position, seller.name, buyer.name, round(fee, 2))
 
 
@@ -123,6 +124,41 @@ def run_ai_window(rng: random.Random, clubs: list[Club],
                 completed.append(execute_transfer(buyer, seller, target, fee))
                 buys += 1
     return completed
+
+
+# ---------------------------------------------------------------- free agents
+
+def sign_free_agent(club: Club, player: Player, years: int = 3) -> str:
+    player.contract_years = years
+    club.add_player(player)
+    player.morale = min(100.0, player.morale + 10)
+    return (f"FREE: {player.name} ({player.position}, {player.age}) joins "
+            f"{club.name} on a free transfer ({years}yr deal)")
+
+
+def run_free_agent_signings(rng: random.Random, clubs: list[Club],
+                            free_agents: list[Player],
+                            user_club_id: int | None = None) -> list[str]:
+    """AI clubs pick over the free-agent pool. Mutates ``free_agents``."""
+    news: list[str] = []
+    pool = sorted(free_agents, key=lambda p: -p.ability)
+    signings: dict[int, int] = {}
+    for player in pool:
+        suitors = [c for c in clubs
+                   if c.id != user_club_id
+                   and signings.get(c.id, 0) < 2
+                   and (len(c.squad) < 24
+                        or len(c.players_at(player.position)) < MIN_DEPTH[player.position])
+                   and player.ability >= c.squad_strength - 12
+                   and c.wage_bill + player.wage <= c.wage_budget]
+        if not suitors or rng.random() < 0.3:
+            continue
+        club = max(suitors, key=lambda c: c.reputation * rng.uniform(0.85, 1.15))
+        years = 3 if player.age < 28 else 2
+        news.append(sign_free_agent(club, player, years))
+        signings[club.id] = signings.get(club.id, 0) + 1
+        free_agents.remove(player)
+    return news
 
 
 # ---------------------------------------------------------------------- loans

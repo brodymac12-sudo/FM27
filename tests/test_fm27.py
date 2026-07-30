@@ -349,14 +349,15 @@ class TestStarPlayers(unittest.TestCase):
 
 
 class TestLeagueQuality(unittest.TestCase):
-    def test_average_ability_does_not_inflate(self):
+    def test_on_pitch_quality_does_not_inflate(self):
         world = GameWorld.new(seed=99)
-        baseline = world.baseline_ca
+        baseline = world.baseline_xi
         world.simulate_years(10)
-        drift = world._avg_ability() - baseline
-        self.assertLess(abs(drift), 4.0)
-        # Turnover keeps happening: new blood arrives as veterans leave.
-        self.assertGreater(len(world.retired), 300)
+        drift = world._avg_xi_strength() - baseline
+        self.assertLess(abs(drift), 3.5)
+        # Turnover keeps happening: new blood arrives as veterans leave
+        # (some by retirement, others released into free agency).
+        self.assertGreater(len(world.retired), 200)
         self.assertGreater(world.next_pid, 44 * 23 + 500)
 
 
@@ -388,6 +389,129 @@ class TestAttributeSystem(unittest.TestCase):
         p = Player.from_dict(d)
         self.assertIn("finishing", p.attrs)
         self.assertGreater(p.ability, 60)
+
+
+class TestContractsAndFreeAgency(unittest.TestCase):
+    def test_contract_lifecycle(self):
+        world = GameWorld.new(seed=51)
+        for club in world.clubs.values():
+            for p in club.squad:
+                self.assertGreaterEqual(p.contract_years, 1)
+        world.simulate_years(1)
+        # Nobody employed is out of contract; releases went to the pool.
+        for club in world.clubs.values():
+            for p in club.squad:
+                self.assertGreaterEqual(p.contract_years, 1)
+        self.assertGreater(len(world.free_agents), 0)
+        for p in world.free_agents:
+            self.assertIsNone(p.club_id)
+        # Free agents get signed in the next windows.
+        pool_before = {p.id for p in world.free_agents}
+        world.simulate_years(1)
+        signed = [p for c in world.clubs.values() for p in c.squad
+                  if p.id in pool_before]
+        self.assertGreater(len(signed), 0)
+
+    def test_expiring_contract_cuts_value(self):
+        rng = random.Random(1)
+        p = generate_player(rng, 1, "MF", 26, 75)
+        p.contract_years = 4
+        long_value = p.value
+        p.contract_years = 1
+        self.assertLess(p.value, long_value * 0.9)
+
+
+class TestBoardAndSackings(unittest.TestCase):
+    def test_sack_and_new_job(self):
+        world = GameWorld.new(seed=53)
+        world.start_career(20, "Doomed Manager")     # Burnley
+        world.user_confidence = 0.0
+        result = world.simulate_rest_of_season()      # halts on the sack
+        self.assertIsNone(result)
+        self.assertTrue(world.pending_sack)
+        offers = world.job_offers()
+        self.assertTrue(1 <= len(offers) <= 3)
+        self.assertNotIn(20, [c.id for c in offers])
+        world.accept_job(offers[0].id)
+        self.assertFalse(world.pending_sack)
+        self.assertEqual(world.user_club_id, offers[0].id)
+        self.assertEqual(len(world.manager_stints), 2)
+        self.assertEqual(world.manager_stints[0]["reason"], "sacked")
+        # Career continues at the new club.
+        self.assertIsNotNone(world.simulate_rest_of_season())
+
+    def test_good_season_builds_confidence(self):
+        world = GameWorld.new(seed=57)
+        world.start_career(1, "Safe Hands")           # Liverpool, high expectation
+        world.simulate_rest_of_season()
+        if not world.pending_sack:                    # met expectations
+            self.assertGreater(world.user_confidence, 30)
+        self.assertIn("board", world.history[0])
+
+    def test_unsackable_mode(self):
+        world = GameWorld.new(seed=53)
+        world.start_career(20, "Untouchable")
+        world.unsackable = True
+        world.user_confidence = 0.0
+        summary = world.simulate_rest_of_season()     # runs to completion
+        self.assertIsNotNone(summary)
+        self.assertFalse(world.pending_sack)
+        self.assertEqual(world.user_club_id, 20)
+
+
+class TestAutopilot(unittest.TestCase):
+    def test_assistant_manages_user_club_in_sims(self):
+        world = GameWorld.new(seed=61)
+        world.start_career(20, "Delegator")           # Burnley
+        original_ids = {p.id for p in world.user_club.squad}
+        outside_ids = {p.id for c in world.clubs.values() if c.id != 20
+                       for p in c.squad}
+        world.autopilot = True
+        world.simulate_years(3)
+        world.autopilot = False
+        club = world.user_club
+        if world.pending_sack:                        # autopilot can't stop the axe
+            return
+        # Contracts were renewed rather than everyone walking for free.
+        for p in club.squad:
+            self.assertGreaterEqual(p.contract_years, 1)
+        # The assistant brought players in from elsewhere in the league.
+        arrivals = {p.id for p in club.squad if p.loaned_from is None} & outside_ids
+        self.assertGreater(len(arrivals), 0)
+        self.assertGreaterEqual(len(club.squad), 16)
+
+    def test_manual_mode_still_protects_user_club_from_ai_raids(self):
+        # The AI transfer window must never buy or sell for the user's club
+        # when the exclusion is set (contract expiries walking is separate).
+        from fm27.transfers import run_ai_window
+        world = GameWorld.new(seed=63)
+        user_club = world.clubs[1]                    # Liverpool: prime raid target
+        deals = run_ai_window(world.rng, list(world.clubs.values()),
+                              user_club_id=user_club.id)
+        for t in deals:
+            self.assertNotEqual(t.from_club, user_club.name)
+            self.assertNotEqual(t.to_club, user_club.name)
+        # With autopilot (no exclusion) the same club is free to trade.
+        world2 = GameWorld.new(seed=63)
+        deals2 = run_ai_window(world2.rng, list(world2.clubs.values()),
+                               user_club_id=None)
+        self.assertGreater(len(deals2), 0)
+
+
+class TestTrainingFocus(unittest.TestCase):
+    def test_focus_shapes_growth(self):
+        base = generate_player(random.Random(9), 1, "MF", 18, 55)
+        base.potential = 90
+        clone = Player.from_dict(base.to_dict())
+        base.training_focus = "Physical"
+        phys = ("pace", "stamina", "strength")
+        before_a = sum(base.attrs[a] for a in phys)
+        before_b = sum(clone.attrs[a] for a in phys)
+        base.develop(random.Random(5), 1.0, 80)
+        clone.develop(random.Random(5), 1.0, 80)
+        gain_focused = sum(base.attrs[a] for a in phys) - before_a
+        gain_balanced = sum(clone.attrs[a] for a in phys) - before_b
+        self.assertGreater(gain_focused, gain_balanced)
 
 
 class TestEditor(unittest.TestCase):

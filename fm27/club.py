@@ -188,4 +188,6 @@ def build_initial_squad(rng: random.Random, club: Club, next_pid) -> None:
                 weights=[20, 35, 30, 15])[0]
             youth_malus = max(0, (22 - age)) * 1.8
             target = base - drop - youth_malus + rng.uniform(-3, 3)
-            club.add_player(generate_player(rng, next_pid(), pos, age, target))
+            player = generate_player(rng, next_pid(), pos, age, target)
+            player.contract_years = rng.randint(1, 4)
+            club.add_player(player)

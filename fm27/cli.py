@@ -9,7 +9,8 @@ from .player import ATTRS, ATTR_GROUPS
 from .save import list_saves, load_world, save_world
 from .transfers import (ai_offer_for, execute_loan, execute_transfer,
                         find_loan_host, loan_prospects, loans_in_count,
-                        scout_targets, user_bid, would_get_minutes)
+                        scout_targets, sign_free_agent, user_bid,
+                        would_get_minutes)
 from .world import GameWorld
 
 LINE = "─" * 74
@@ -146,7 +147,20 @@ def print_squad(world: GameWorld, club: Club) -> None:
                                             for p, host in out))
     idx = ask_int("View player # for full attributes (0 to back): ", 0, len(squad))
     if idx:
-        player_sheet(world, squad[idx - 1])
+        player = squad[idx - 1]
+        player_sheet(world, player)
+        if club.id == world.user_club_id:
+            groups = list(ATTR_GROUPS)
+            opts = "  ".join(f"{i + 1}) {g}" for i, g in enumerate(groups))
+            print(f"  Training focus (current: {player.training_focus or 'balanced'})")
+            print(f"  {opts}  5) Balanced  0) Leave")
+            c = ask_int("> ", 0, 5)
+            if 1 <= c <= 4:
+                player.training_focus = groups[c - 1]
+                print(f"  {player.name} will focus on {groups[c - 1]} training.")
+            elif c == 5:
+                player.training_focus = None
+                print(f"  {player.name} returns to balanced training.")
 
 
 def describe_match(rep: MatchReport, detailed: bool) -> None:
@@ -217,6 +231,13 @@ def print_season_summary(summary: dict) -> None:
         print(f"  Young Player: {yp['name']} ({yp['club']}), age {yp['age']}")
     for note in summary.get("retired", []):
         print(f"  📣 {note}")
+    for note in summary.get("contract_news", []):
+        print(f"  📝 {note}")
+    if "board" in summary:
+        b = summary["board"]
+        print(f"  Boardroom: expected {b['expected']}{_ordinal(b['expected'])}, "
+              f"finished {b['actual']}{_ordinal(b['actual'])} — "
+              f"confidence {b['confidence']}%")
 
 
 def one_line_summary(summary: dict) -> str:
@@ -247,11 +268,13 @@ def transfer_menu(world: GameWorld) -> None:
         print(f"  Budget £{club.transfer_budget:.1f}M | wage room "
               f"£{club.wage_budget - club.wage_bill:.1f}M")
         print("  1) Browse market & bid\n  2) Sell a player\n  3) Loan a player in\n"
-              "  4) Loan a player out\n  5) Current loans\n  6) Transfer news\n  0) Back")
-        choice = ask_int("> ", 0, 6)
+              "  4) Loan a player out\n  5) Current loans\n"
+              f"  6) Free agents ({len(world.free_agents)} available)\n"
+              "  7) Transfer news\n  0) Back")
+        choice = ask_int("> ", 0, 7)
         if choice == 0:
             return
-        if choice in (1, 2, 3, 4) and not world.window_open:
+        if choice in (1, 2, 3, 4, 6) and not world.window_open:
             print(f"  The transfer window is closed — {world.next_window_hint()}.")
             continue
         if choice == 1:
@@ -264,10 +287,33 @@ def transfer_menu(world: GameWorld) -> None:
             _loan_out_flow(world, club)
         elif choice == 5:
             _view_loans(world, club)
+        elif choice == 6:
+            _free_agent_flow(world, club)
         else:
             print("\nRecent deals around the league:")
             for line in world.last_window_transfers[:15] or ["  (quiet window)"]:
                 print(f"  • {line}")
+
+
+def _free_agent_flow(world: GameWorld, club: Club) -> None:
+    pool = sorted(world.free_agents, key=lambda p: -p.ability)
+    if not pool:
+        print("  The free-agent pool is empty.")
+        return
+    print("\nOut-of-contract players (no fee — wages only):")
+    for i, p in enumerate(pool, start=1):
+        print(f"{i:>3} {p.position:<4}{p.name:<22} age {p.age}  CA {ca_band(p)}  "
+              f"pot {pot_band(p)}  wage £{p.wage:.1f}M")
+    idx = ask_int("Sign # (0 to cancel): ", 0, len(pool))
+    if idx == 0:
+        return
+    player = pool[idx - 1]
+    if club.wage_bill + player.wage > club.wage_budget:
+        print("  You can't cover their wages.")
+        return
+    years = ask_int("Contract length in years (1-4): ", 1, 4, default=3)
+    world.free_agents.remove(player)
+    print(f"  {sign_free_agent(club, player, years)}")
 
 
 def _market_filters(world: GameWorld, club: Club):
@@ -396,6 +442,60 @@ def _view_loans(world: GameWorld, club: Club) -> None:
     for p in ins:
         parent = world.clubs[p.loaned_from]
         print(f"  IN:  {p.name} from {parent.name} — {p.season['apps']} apps")
+
+
+# ----------------------------------------------------------------- contracts
+
+def contracts_menu(world: GameWorld) -> None:
+    club = world.user_club
+    squad = sorted((p for p in club.squad if p.loaned_from is None),
+                   key=lambda p: (p.contract_years, -p.ability))
+    print(f"\n{club.name} contracts — wage bill £{club.wage_bill:.1f}M of "
+          f"£{club.wage_budget:.1f}M budget")
+    print(f"{'#':>3} {'Pos':<4}{'Name':<22}{'Age':>3}{'CA':>4}"
+          f"{'Yrs left':>9}{'Wage £M':>9}")
+    for i, p in enumerate(squad, start=1):
+        flag = " ⚠ EXPIRING" if p.contract_years <= 1 else ""
+        print(f"{i:>3} {p.position:<4}{p.name:<22}{p.age:>3}{p.ability:>4.0f}"
+              f"{p.contract_years:>9}{p.wage:>9.1f}{flag}")
+    print("  Players with no years left walk away for free at season's end.")
+    idx = ask_int("Offer new deal to # (0 to back): ", 0, len(squad))
+    if idx == 0:
+        return
+    player = squad[idx - 1]
+    max_years = 2 if player.age >= 33 else 5
+    years = ask_int(f"Contract length (1-{max_years} years): ", 1, max_years,
+                    default=min(3, max_years))
+    if club.wage_bill > club.wage_budget * 1.05:
+        print("  The board blocks the deal — the wage bill is already over budget.")
+        return
+    player.contract_years = years
+    player.morale = min(100.0, player.morale + 5)
+    print(f"  {player.name} signs until {world.year + years} "
+          f"(£{player.wage:.1f}M/yr).")
+
+
+# --------------------------------------------------------------- the sack
+
+def handle_sack(world: GameWorld) -> bool:
+    """Deal with a dismissal. Returns False when the career is over."""
+    print(f"\n{LINE}\n🪓 SACKED — {world.sack_reason}.\n{LINE}")
+    offers = world.job_offers()
+    print("\nOffers on the table:")
+    for i, c in enumerate(offers, start=1):
+        print(f"  {i}) {c.name} ({data.DIVISION_NAMES[c.division]}, "
+              f"rep {c.reputation}, budget £{c.transfer_budget:.0f}M)")
+    print("  0) Walk away from management")
+    choice = ask_int("> ", 0, len(offers))
+    if choice == 0:
+        world.retire_manager()
+        print("  You leave the dugout behind. The world plays on without you.")
+        return False
+    club = offers[choice - 1]
+    world.accept_job(club.id)
+    print(f"\n  Welcome to {club.name}. The board's confidence starts at 60% — "
+          "earn it.")
+    return True
 
 
 # ------------------------------------------------------------------ scouting
@@ -640,6 +740,17 @@ def club_page(world: GameWorld) -> None:
             print(f"  {comp}: {len(seasons)} ({', '.join(seasons[-5:])})")
     for season, tier, pos in club.season_finishes[-10:]:
         print(f"  {season}: {pos}{_ordinal(pos)} in {data.DIVISION_NAMES[tier]}")
+    if world.manager_stints:
+        print(f"\n  Managerial career — {world.manager_name}:")
+        for s in world.manager_stints:
+            end = s["to"] or "present"
+            note = f" ({s['reason']})" if s["reason"] else ""
+            print(f"    {s['club']}: {s['from']} → {end}{note}")
+    security = "ON (can't be sacked)" if world.unsackable else "OFF"
+    if ask(f"  Job security is {security}. Toggle it? (y/n) [n]: ",
+           "n").lower().startswith("y"):
+        world.unsackable = not world.unsackable
+        print(f"  Job security now {'ON' if world.unsackable else 'OFF'}.")
 
 
 def _ordinal(n: int) -> str:
@@ -682,40 +793,60 @@ def continue_to_next_match(world: GameWorld) -> None:
         print("  💷 The transfer window is open.")
 
 
+def _ask_autopilot() -> bool:
+    return ask("Let your assistant run transfers, loans and contract renewals "
+               "for your club while simming? (y/n) [y]: ", "y").lower().startswith("y")
+
+
 def career_loop(world: GameWorld) -> None:
     while True:
+        if world.pending_sack:
+            if not handle_sack(world):
+                return
         club = world.user_club
         league = world.league_of(club.id)
         pos = league.position_of(club.id)
         print(f"\n{LINE}")
+        board = ("secure" if world.unsackable
+                 else f"{world.user_confidence:.0f}%")
         print(f"{world.season_label} | {club.name} | "
               f"{data.DIVISION_NAMES[club.division]} pos {pos or '-'} | "
+              f"Board {board} | "
               f"Next: {next_user_fixture(world)}")
         print(LINE)
-        print("  1) Continue (to your next match)   8) Scouting")
-        print("  2) Sim to end of season            9) Tactics")
-        print("  3) Sim multiple seasons           10) Finances")
-        print("  4) Squad                          11) Club page")
-        print("  5) League tables                  12) History & records")
-        print("  6) Fixtures & results             13) Player editor")
-        print("  7) Transfers & loans              14) Save game")
+        print("  1) Continue (to your next match)   9) Tactics")
+        print("  2) Sim to end of season           10) Finances")
+        print("  3) Sim multiple seasons           11) Club page")
+        print("  4) Squad & training               12) History & records")
+        print("  5) League tables                  13) Player editor")
+        print("  6) Fixtures & results             14) Save game")
+        print("  7) Transfers & loans              15) Contracts")
+        print("  8) Scouting")
         print("  0) Quit to main menu")
-        choice = ask_int("> ", 0, 14)
+        choice = ask_int("> ", 0, 15)
         if choice == 0:
             if ask("Quit without saving? (y/n): ").lower().startswith("y"):
                 return
         elif choice == 1:
             continue_to_next_match(world)
         elif choice == 2:
+            world.autopilot = _ask_autopilot()
             summary = world.simulate_rest_of_season()
-            print_season_summary(summary)
+            world.autopilot = False
+            if summary:
+                print_season_summary(summary)
         elif choice == 3:
             years = ask_int("How many seasons to simulate (1-100)? ", 1, 100)
+            world.autopilot = _ask_autopilot()
             print(f"\nSimulating {years} season(s) — your assistant handles team "
                   "selection while you watch the years roll by...\n")
             world.simulate_years(years,
                                  progress=lambda s: print("  " + one_line_summary(s)))
-            print("\nDone. The world has moved on — check the history menus.")
+            world.autopilot = False
+            if world.pending_sack:
+                print("\nThe simulation stopped early — the board has acted.")
+            else:
+                print("\nDone. The world has moved on — check the history menus.")
         elif choice == 4:
             print_squad(world, club)
         elif choice == 5:
@@ -741,6 +872,8 @@ def career_loop(world: GameWorld) -> None:
             name = ask("Save name [career]: ", "career")
             path = save_world(world, name)
             print(f"  Saved to {path}")
+        elif choice == 15:
+            contracts_menu(world)
 
 
 def new_career() -> None:
@@ -756,7 +889,11 @@ def new_career() -> None:
         print(f"  {i:>2}) {c.name:<26} {data.DIVISION_NAMES[c.division]:<15}"
               f"rep {c.reputation}  budget £{c.transfer_budget:.0f}M")
     idx = ask_int("> ", 1, len(all_clubs))
-    world.user_club_id = all_clubs[idx - 1].id
+    world.start_career(all_clubs[idx - 1].id, manager)
+    if ask("Enable job security — the board can never sack you? (y/n) [n]: ",
+           "n").lower().startswith("y"):
+        world.unsackable = True
+        print("  Job security enabled. The board will grumble but never act.")
     print(f"\nWelcome to {world.user_club.name}, {manager}! The board expects "
           "steady progress. Good luck.")
     career_loop(world)
