@@ -114,13 +114,13 @@ class League:
 
 
 class Cup:
-    """Straight knockout for all 28 clubs.
+    """Straight knockout for every club in the pyramid.
 
-    Round 1 has 12 ties; the four best-reputation clubs receive byes into the
-    last 16. Ties level after 90 minutes go to extra time and penalties.
+    Enough first-round ties are drawn to reduce the field to a power of two;
+    the best-reputation clubs receive first-round byes (mirroring higher-tier
+    sides entering later). Ties level after 90 minutes go to extra time and
+    penalties.
     """
-
-    ROUND_NAMES = ["First Round", "Last 16", "Quarter-final", "Semi-final", "Final"]
 
     def __init__(self, name: str):
         self.name = name
@@ -133,8 +133,12 @@ class Cup:
 
     def draw(self, rng: random.Random, clubs: dict[int, Club]) -> None:
         ids = sorted(clubs.keys(), key=lambda c: clubs[c].reputation, reverse=True)
-        self.byes = ids[:4]
-        entrants = ids[4:]
+        bracket = 1
+        while bracket < len(ids):
+            bracket *= 2
+        n_byes = bracket - len(ids)
+        self.byes = ids[:n_byes]
+        entrants = ids[n_byes:]
         rng.shuffle(entrants)
         self.alive = list(ids)
         self.current_round = 0
@@ -142,12 +146,21 @@ class Cup:
         self.winner_id = None
         self.pairings = [(entrants[i], entrants[i + 1]) for i in range(0, len(entrants), 2)]
 
+    @staticmethod
+    def rounds_needed(n_clubs: int) -> int:
+        rounds, field = 0, 1
+        while field < n_clubs:
+            field *= 2
+            rounds += 1
+        return rounds
+
     @property
     def finished(self) -> bool:
         return self.winner_id is not None
 
     def round_name(self) -> str:
-        return self.ROUND_NAMES[min(self.current_round, len(self.ROUND_NAMES) - 1)]
+        return {1: "Final", 2: "Semi-final", 4: "Quarter-final",
+                8: "Last 16", 16: "Last 32"}.get(len(self.pairings), "First Round")
 
     def play_round(self, rng: random.Random, clubs: dict[int, Club]) -> list[MatchReport]:
         if self.finished:

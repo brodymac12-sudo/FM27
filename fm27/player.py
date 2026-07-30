@@ -46,6 +46,7 @@ class Player:
         self.career["seasons"] = 0
         self.trophies: list[str] = []
         self.club_id: int | None = None
+        self.loaned_from: int | None = None   # parent club id while on loan
 
     # ------------------------------------------------------------------ rating
 
@@ -141,7 +142,7 @@ class Player:
             "morale": self.morale, "injured_for": self.injured_for,
             "suspended_for": self.suspended_for, "season": self.season,
             "career": self.career, "trophies": self.trophies,
-            "club_id": self.club_id,
+            "club_id": self.club_id, "loaned_from": self.loaned_from,
         }
 
     @classmethod
@@ -156,6 +157,7 @@ class Player:
         p.career = d["career"]
         p.trophies = d["trophies"]
         p.club_id = d["club_id"]
+        p.loaned_from = d.get("loaned_from")
         return p
 
 

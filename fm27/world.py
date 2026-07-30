@@ -15,11 +15,11 @@ from . import data
 from .club import Club, FORMATIONS, build_initial_squad
 from .competition import Cup, League, Playoff
 from .match_engine import MatchReport
-from .player import generate_player
-from .transfers import MIN_DEPTH, run_ai_window
+from .player import Player, generate_player
+from .transfers import MIN_DEPTH, run_ai_loans, run_ai_window
 
-CUP_AFTER_ROUNDS = {5, 10, 15, 20}   # a cup round follows these league rounds
-SQUAD_CAP = 28                       # clubs release surplus players beyond this
+SQUAD_CAP = 28          # clubs release surplus players beyond this
+JAN_WINDOW_LENGTH = 5   # calendar events the mid-season window stays open
 
 
 class GameWorld:
@@ -33,8 +33,12 @@ class GameWorld:
         self.playoff = Playoff()
         self.calendar: list[dict] = []
         self.calendar_pos = 0
+        self.mid_window_start = 0
         self.user_club_id: int | None = None
         self.manager_name: str | None = None
+        self.scout_queue: list[int] = []
+        self.scout_reports: dict[int, dict] = {}
+        self.shortlist: list[int] = []
         self.history: list[dict] = []
         self.retired: list[dict] = []
         self.records: dict = {"biggest_win": None, "best_season_points": None,
@@ -80,10 +84,12 @@ class GameWorld:
     # ------------------------------------------------------------ season start
 
     def _start_season(self, first: bool = False) -> None:
+        news: list[str] = []
         if not first:
-            self.last_window_transfers = [
-                str(t) for t in run_ai_window(self.rng, list(self.clubs.values()),
-                                              self.user_club_id)]
+            news += [str(t) for t in run_ai_window(self.rng, list(self.clubs.values()),
+                                                   self.user_club_id)]
+        news += run_ai_loans(self.rng, list(self.clubs.values()), self.user_club_id)
+        self.last_window_transfers = news
         self.leagues = []
         for tier, name in enumerate(data.DIVISION_NAMES):
             league = League(name, tier, [c.id for c in self.division_clubs(tier)])
@@ -101,17 +107,39 @@ class GameWorld:
                 p.suspended_for = 0
 
     def _build_calendar(self) -> None:
-        cal: list[dict] = []
-        cup_round = 0
-        for r in range(self.leagues[0].num_rounds):
-            cal.append({"type": "league", "round": r})
-            if (r + 1) in CUP_AFTER_ROUNDS:
-                cal.append({"type": "cup", "round": cup_round})
-                cup_round += 1
-        cal.append({"type": "cup", "round": cup_round})       # the final
+        """Interleave both divisions' matchdays (they differ in length), cup
+        rounds, and the promotion playoff into a single event stream."""
+        timed: list[tuple[float, int, dict]] = []
+        for tier, league in enumerate(self.leagues):
+            n = league.num_rounds
+            for r in range(n):
+                timed.append(((r + 0.5) / n, 1 + tier,
+                              {"type": "league", "tier": tier, "round": r}))
+        n_cup = Cup.rounds_needed(len(self.clubs))
+        for i in range(n_cup - 1):      # early rounds spread through the season
+            timed.append((0.10 + 0.72 * i / max(1, n_cup - 2), 0,
+                          {"type": "cup", "round": i}))
+        timed.append((1.01, 0, {"type": "cup", "round": n_cup - 1}))  # the final
+        timed.sort(key=lambda t: (t[0], t[1]))
+        cal = [e for _, _, e in timed]
         cal.append({"type": "playoff_semis"})
         cal.append({"type": "playoff_final"})
         self.calendar = cal
+        self.mid_window_start = len(cal) // 2
+
+    @property
+    def window_open(self) -> bool:
+        """Transfers/loans are allowed pre-season and during January."""
+        return (self.calendar_pos == 0
+                or self.mid_window_start <= self.calendar_pos
+                < self.mid_window_start + JAN_WINDOW_LENGTH)
+
+    def next_window_hint(self) -> str:
+        if self.window_open:
+            return "open now"
+        if self.calendar_pos < self.mid_window_start:
+            return f"opens in January ({self.mid_window_start - self.calendar_pos} events away)"
+        return "opens pre-season"
 
     # --------------------------------------------------------------- advancing
 
@@ -127,15 +155,21 @@ class GameWorld:
     def advance(self) -> dict:
         """Process the next calendar event.
 
-        Returns {"event", "reports", "season_summary"} — the summary is only
-        present when this event closed out the season (the next season is
-        started automatically).
+        Returns {"event", "reports", "scout_completed", "season_summary"} —
+        the summary is only present when this event closed out the season
+        (the next season is started automatically).
         """
+        if self.calendar_pos == self.mid_window_start:
+            # January: a quieter AI window, plus loan moves.
+            deals = [str(t) for t in run_ai_window(
+                self.rng, list(self.clubs.values()), self.user_club_id, max_buys=1)]
+            deals += run_ai_loans(self.rng, list(self.clubs.values()),
+                                  self.user_club_id, max_out=1)
+            self.last_window_transfers = deals + self.last_window_transfers
         ev = self.calendar[self.calendar_pos]
         if ev["type"] == "league":
-            reports: list[MatchReport] = []
-            for league in self.leagues:
-                reports.extend(league.play_round(self.rng, ev["round"], self.clubs))
+            reports = self.leagues[ev["tier"]].play_round(self.rng, ev["round"],
+                                                          self.clubs)
         elif ev["type"] == "cup":
             reports = self.cup.play_round(self.rng, self.clubs)
         elif ev["type"] == "playoff_semis":
@@ -146,12 +180,84 @@ class GameWorld:
         self.calendar_pos += 1
         self._track_records(reports)
         self._post_event_recovery({r.home.id for r in reports} | {r.away.id for r in reports})
+        completed = self._complete_scout_reports()
         summary = None
         if self.calendar_pos >= len(self.calendar):
             summary = self._finish_season()
             self.year += 1
             self._start_season()
-        return {"event": ev, "reports": reports, "season_summary": summary}
+        return {"event": ev, "reports": reports, "scout_completed": completed,
+                "season_summary": summary}
+
+    # ---------------------------------------------------------------- scouting
+
+    def find_player(self, pid: int) -> tuple[Player | None, Club | None]:
+        for club in self.clubs.values():
+            for p in club.squad:
+                if p.id == pid:
+                    return p, club
+        return None, None
+
+    @property
+    def num_scouts(self) -> int:
+        """Scouting staff size scales with the user club's stature."""
+        club = self.user_club
+        if club is None:
+            return 0
+        return max(2, min(4, 1 + club.reputation // 25))
+
+    def queue_scout(self, pid: int) -> bool:
+        if pid in self.scout_queue or self.user_club is None:
+            return False
+        self.scout_queue.append(pid)
+        return True
+
+    def _complete_scout_reports(self) -> list[str]:
+        """Each matchday, each scout finishes one queued report."""
+        done: list[str] = []
+        for _ in range(min(self.num_scouts, len(self.scout_queue))):
+            pid = self.scout_queue.pop(0)
+            p, club = self.find_player(pid)
+            if p is None:
+                continue
+            user = self.user_club
+            pot_est = max(int(p.ability),
+                          p.potential + self.rng.randint(-3, 3))
+            gap = p.ability - user.squad_strength
+            upside = pot_est - user.squad_strength
+            stars = 1 + (gap > -8) + (gap > -2) + (gap > 4 or upside > 8) + (upside > 14)
+            self.scout_reports[pid] = {
+                "pid": pid, "name": p.name, "position": p.position,
+                "age": p.age, "club": club.name,
+                "season": self.season_label,
+                "ability": round(p.ability, 1),
+                "potential_est": pot_est,
+                "attrs": {k: round(v) for k, v in p.attrs.items()},
+                "value": p.value, "wage": p.wage,
+                "stars": min(5, stars),
+                "on_loan": p.loaned_from is not None,
+            }
+            done.append(p.name)
+        return done
+
+    # ------------------------------------------------------------------- loans
+
+    def loaned_out(self, club: Club) -> list[tuple[Player, Club]]:
+        """Players owned by ``club`` currently playing elsewhere."""
+        out = []
+        for host in self.clubs.values():
+            for p in host.squad:
+                if p.loaned_from == club.id:
+                    out.append((p, host))
+        return out
+
+    def _return_loans(self) -> None:
+        for host in self.clubs.values():
+            for p in [p for p in host.squad if p.loaned_from is not None]:
+                parent = self.clubs[p.loaned_from]
+                host.remove_player(p)
+                p.loaned_from = None
+                parent.add_player(p)
 
     def _post_event_recovery(self, played_club_ids: set[int]) -> None:
         for club in self.clubs.values():
@@ -205,10 +311,13 @@ class GameWorld:
         summary["awards"] = self._season_awards(label)
         self._promotion_relegation(tables, summary)
         self._settle_finances(tables)
-        self._develop_and_age()
+        self._develop_and_age()      # loanees develop on their loan-club minutes
+        self._return_loans()
         summary["retired"] = self._process_retirements()
         self._youth_intake()
         summary["released"] = self._trim_squads()
+        self.shortlist = [pid for pid in self.shortlist if self.find_player(pid)[0]]
+        self.scout_queue = [pid for pid in self.scout_queue if self.find_player(pid)[0]]
         if self.user_club:
             summary["user_club"] = self.user_club.name
             summary["user_division"] = data.DIVISION_NAMES[self.user_club.division]
@@ -360,7 +469,7 @@ class GameWorld:
         for club in self.clubs.values():
             while len(club.squad) > SQUAD_CAP:
                 candidates = sorted(
-                    club.squad,
+                    (p for p in club.squad if p.loaned_from is None),
                     key=lambda p: p.ability + max(0, p.potential - p.ability) * 0.6)
                 for p in candidates:
                     if len(club.players_at(p.position)) > MIN_DEPTH[p.position]:
@@ -410,6 +519,10 @@ class GameWorld:
             "playoff": self.playoff.to_dict(),
             "calendar": self.calendar,
             "calendar_pos": self.calendar_pos,
+            "mid_window_start": self.mid_window_start,
+            "scout_queue": self.scout_queue,
+            "scout_reports": self.scout_reports,
+            "shortlist": self.shortlist,
             "history": self.history,
             "retired": self.retired,
             "records": self.records,
@@ -430,6 +543,10 @@ class GameWorld:
         world.playoff = Playoff.from_dict(d["playoff"])
         world.calendar = d["calendar"]
         world.calendar_pos = d["calendar_pos"]
+        world.mid_window_start = d.get("mid_window_start", len(d["calendar"]) // 2)
+        world.scout_queue = d.get("scout_queue", [])
+        world.scout_reports = {int(k): v for k, v in d.get("scout_reports", {}).items()}
+        world.shortlist = d.get("shortlist", [])
         world.history = d["history"]
         world.retired = d["retired"]
         world.records = d["records"]

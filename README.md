@@ -1,10 +1,13 @@
 # FM27 — Football Manager 27
 
 A deep, self-contained football management simulation for the terminal.
-Take charge of one of 28 fictional clubs across a two-division pyramid, or sit
-back and watch the world evolve across **decades of simulated seasons**.
+Manage one of 44 real English clubs across the Premier League and EFL
+Championship, or sit back and watch the world evolve across **decades of
+simulated seasons**.
 
 Pure Python 3.10+, standard library only — no dependencies to install.
+An unofficial fan project: real club names are used descriptively; all
+players are fictional.
 
 ## Quick start
 
@@ -22,11 +25,12 @@ python -m fm27 --sim 10 --load saves/world.json --save-to world
 ## Features
 
 **The world**
-- 28 clubs in two divisions (Premier Division & Championship) with
-  promotion, relegation, and a 3rd–6th place **promotion playoff**
-- The FA National Cup: straight knockout for all 28 clubs, with byes,
-  extra time, and penalty shootouts
-- Fixture calendar interleaving league matchdays, cup rounds, and playoffs
+- 44 real English clubs: the 20-team Premier League and 24-team Championship,
+  each with its own fixture calendar (38 and 46 matchdays, interleaved)
+- Promotion and relegation (3 up / 3 down) with a 3rd–6th place
+  **promotion playoff**
+- The FA Cup: knockout for all 44 clubs, with first-round byes for the
+  biggest sides, extra time, and penalty shootouts
 
 **The match engine**
 - Probabilistic engine driven by the selected XI: attack/midfield/defence
@@ -37,16 +41,32 @@ python -m fm27 --sim 10 --load saves/world.json --save-to world
 **Squads & players**
 - Six-attribute players (pace, shooting, passing, defending, physical,
   goalkeeping) with hidden potential, growth curves, and age-related decline
-- Youth intake every season, retirements, and multi-decade career records
+- Youth intake every season, retirements, squad-size discipline, and
+  multi-decade career records
 - Six formations and three mentalities that genuinely change how matches play
 
-**Management**
-- Transfer market: scout targets, negotiate bids, field offers for your
-  players — while AI clubs strengthen their own squads every window
-- Finances: TV money, gate receipts, prize money, parachute payments,
-  wage bills, and board intervention when the money runs out
-- Save/load any world as JSON, with fully deterministic resumption
-  (a reloaded save replays *identically*)
+**Transfers, loans & scouting**
+- Two transfer windows a season — summer and January. Deals only happen
+  while a window is open, for you and for the 43 AI clubs
+- **Loans**: send youngsters out for a season of first-team football (they
+  develop on the minutes they actually play), or bring in promising loanees
+  from bigger clubs. The AI runs its own loan market every window
+- **Scouting network**: market listings only show ability/potential bands
+  until you send a scout. Reports take a matchday, reveal exact attributes,
+  estimate potential, and grade targets out of five stars. Keep a shortlist
+  of players you're tracking
+- Sell players by fielding AI offers; every deal respects budgets, wage
+  rooms, and squad-depth rules
+
+**In-game editor**
+- Edit any player in the world at any time: name, age, position, every
+  attribute, potential, fitness/morale, instant injury healing — or move a
+  player to any club, FM-editor style
+
+**Finances**
+- TV money (growing year on year), gate receipts, prize money, parachute
+  payments for relegated clubs, wage bills, and board intervention when
+  the money runs out
 
 **Multi-year simulation**
 - Simulate 1–200 seasons in one command, in-career or as a spectator
@@ -54,19 +74,25 @@ python -m fm27 --sim 10 --load saves/world.json --save-to world
   players of the season, promotions and relegations
 - All-time records: top scorers, most decorated players, club honours
   boards, biggest wins, and a Hall of Fame of retired greats
+- Save/load any world as JSON, with fully deterministic resumption
+  (a reloaded save replays *identically*)
 
 ## Playing a career
 
 1. `python -m fm27` → *New career* → pick a seed (or leave blank), your name,
    and a club.
-2. Play matchday by matchday, or hand the reins to your assistant and
-   simulate whole seasons at a time (*Sim multiple seasons*).
-3. Squad, tables, fixtures, transfers, tactics, finances, club page, and
-   history menus are all one keypress away.
-4. Save from the menu; saves land in `./saves/`.
+2. **Continue** simulates forward to your next match — other leagues and cup
+   rounds play out along the way, scout reports land, and the January
+   window opens mid-season.
+3. Squad, tables, fixtures, transfers & loans, scouting, tactics, finances,
+   club page, history, and the editor are all one keypress away.
+4. Hand the reins to your assistant any time: *Sim to end of season* or
+   *Sim multiple seasons* (1–100 years at once).
+5. Save from the menu; saves land in `./saves/`.
 
-Player potential is shown as a band (A ≥ 85, B ≥ 75, C ≥ 65, D below) —
-scouting young "A" players cheaply is how small clubs climb.
+Potential shows as a band (A ≥ 85, B ≥ 75, C ≥ 65, D below) until your
+scouts have watched a player — signing young "A" prospects cheaply, or
+loaning them, is how small clubs climb.
 
 ## Project layout
 
@@ -75,9 +101,10 @@ scouting young "A" players cheaply is how small clubs climb.
 | `fm27/player.py` | Player attributes, ability, value, development, careers |
 | `fm27/club.py` | Squads, tactics, lineup selection, club finances |
 | `fm27/match_engine.py` | The probabilistic match simulation |
-| `fm27/competition.py` | League scheduling/tables, cup, promotion playoff |
-| `fm27/transfers.py` | AI transfer windows and user bids/sales |
-| `fm27/world.py` | Season calendar, end-of-season processing, multi-year sims |
+| `fm27/competition.py` | League scheduling/tables, FA Cup, promotion playoff |
+| `fm27/transfers.py` | Transfer windows, AI deals, user bids, the loan market |
+| `fm27/world.py` | Season calendar, windows, scouting, end-of-season, multi-year sims |
+| `fm27/editor.py` | The in-game player editor |
 | `fm27/records.py` | All-time records and Hall of Fame queries |
 | `fm27/save.py` | JSON save/load |
 | `fm27/cli.py` | Interactive terminal interface |
@@ -88,7 +115,7 @@ scouting young "A" players cheaply is how small clubs climb.
 python -m unittest discover -s tests
 ```
 
-The suite covers scheduling correctness, match-engine sanity (home
-advantage, strength ordering), full-season and multi-year invariants,
-player development, transfer integrity, and deterministic save/load
-round-trips.
+22 tests cover scheduling correctness, match-engine sanity (home advantage,
+strength ordering), full-season and multi-year invariants, loan and
+transfer integrity, the scouting pipeline, the editor, and deterministic
+save/load round-trips.

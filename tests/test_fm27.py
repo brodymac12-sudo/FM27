@@ -4,9 +4,9 @@ import json
 import random
 import unittest
 
-from fm27 import data
+from fm27 import data, editor
 from fm27.club import FORMATIONS
-from fm27.competition import round_robin_rounds
+from fm27.competition import Cup, round_robin_rounds
 from fm27.match_engine import simulate_match
 from fm27.player import generate_player
 from fm27.world import GameWorld
@@ -35,15 +35,23 @@ class TestScheduling(unittest.TestCase):
 class TestWorldCreation(unittest.TestCase):
     def test_new_world_shape(self):
         world = GameWorld.new(seed=1)
-        self.assertEqual(len(world.clubs), 28)
+        self.assertEqual(len(world.clubs), 44)
         self.assertEqual(len(world.leagues), 2)
-        for league in world.leagues:
-            self.assertEqual(len(league.club_ids), 14)
+        self.assertEqual(len(world.leagues[0].club_ids), 20)
+        self.assertEqual(len(world.leagues[1].club_ids), 24)
+        names = {c.name for c in world.clubs.values()}
+        self.assertIn("Liverpool", names)
+        self.assertIn("Wrexham", names)
         for club in world.clubs.values():
-            self.assertGreaterEqual(len(club.squad), 20)
+            self.assertGreaterEqual(len(club.squad), 18)
             self.assertTrue(any(p.position == "GK" for p in club.squad))
-        # Calendar: 26 league rounds + 5 cup rounds + 2 playoff events.
-        self.assertEqual(len(world.calendar), 33)
+        # Calendar: 38 PL + 46 Championship rounds + 6 cup rounds + 2 playoffs.
+        self.assertEqual(Cup.rounds_needed(44), 6)
+        self.assertEqual(len(world.calendar), 38 + 46 + 6 + 2)
+        # Cup final is scheduled after every league round, before the playoffs.
+        types = [(e["type"], e.get("round")) for e in world.calendar]
+        self.assertEqual(types[-3], ("cup", 5))
+        self.assertEqual(types[-2], ("playoff_semis", None))
 
     def test_seed_reproducibility(self):
         w1 = GameWorld.new(seed=42)
@@ -103,11 +111,12 @@ class TestSeason(unittest.TestCase):
         # Run up to (but not through) the playoff semis to inspect final tables.
         while world.next_event()["type"] != "playoff_semis":
             world.advance()
-        for league in world.leagues:
+        for league, size, games in ((world.leagues[0], 20, 38),
+                                    (world.leagues[1], 24, 46)):
             table = league.table()
-            self.assertEqual(len(table), 14)
+            self.assertEqual(len(table), size)
             for row in table:
-                self.assertEqual(row["P"], 26)
+                self.assertEqual(row["P"], games)
                 self.assertEqual(row["Pts"], row["W"] * 3 + row["D"])
         self.assertTrue(world.cup.finished)
 
@@ -119,8 +128,8 @@ class TestSeason(unittest.TestCase):
                       [c.name for c in world.clubs.values()])
         self.assertGreater(summary["awards"]["top_scorer"]["goals"], 5)
         # Division sizes intact after promotion/relegation.
-        self.assertEqual(len(world.division_clubs(0)), 14)
-        self.assertEqual(len(world.division_clubs(1)), 14)
+        self.assertEqual(len(world.division_clubs(0)), 20)
+        self.assertEqual(len(world.division_clubs(1)), 24)
         # New season began automatically.
         self.assertEqual(world.year, data.START_YEAR + 1)
         self.assertEqual(world.calendar_pos, 0)
@@ -224,6 +233,102 @@ class TestTransfers(unittest.TestCase):
                 self.assertEqual(p.club_id, club.id)
         all_ids = [p.id for c in world.clubs.values() for p in c.squad]
         self.assertEqual(len(all_ids), len(set(all_ids)))
+
+
+class TestLoans(unittest.TestCase):
+    def test_ai_loans_exist_and_are_consistent(self):
+        world = GameWorld.new(seed=29)
+        loanees = [(p, c) for c in world.clubs.values() for p in c.squad
+                   if p.loaned_from is not None]
+        self.assertGreater(len(loanees), 0)
+        for p, host in loanees:
+            self.assertNotEqual(p.loaned_from, host.id)
+            self.assertIn(p.loaned_from, world.clubs)
+            self.assertLessEqual(p.age, 22)
+            # The loanee is not simultaneously in the parent's squad.
+            parent = world.clubs[p.loaned_from]
+            self.assertNotIn(p, parent.squad)
+        loan_news = [line for line in world.last_window_transfers
+                     if line.startswith("LOAN:")]
+        self.assertEqual(len(loan_news), len(loanees))
+
+    def test_loans_survive_seasons_and_windows(self):
+        world = GameWorld.new(seed=31)
+        world.simulate_years(2)  # covers January windows and loan returns
+        for club in world.clubs.values():
+            for p in club.squad:
+                self.assertEqual(p.club_id, club.id)
+                if p.loaned_from is not None:
+                    self.assertIn(p.loaned_from, world.clubs)
+        all_ids = [p.id for c in world.clubs.values() for p in c.squad]
+        self.assertEqual(len(all_ids), len(set(all_ids)))
+
+
+class TestWindowsAndScouting(unittest.TestCase):
+    def test_window_schedule(self):
+        world = GameWorld.new(seed=37)
+        self.assertTrue(world.window_open)          # pre-season
+        world.advance()
+        self.assertFalse(world.window_open)         # season underway
+        while world.calendar_pos < world.mid_window_start:
+            world.advance()
+        self.assertTrue(world.window_open)          # January
+
+    def test_scout_report_pipeline(self):
+        world = GameWorld.new(seed=41)
+        world.user_club_id = 20                     # take over a modest club
+        target = next(p for c in world.clubs.values() if c.id != 20
+                      for p in c.squad)
+        self.assertTrue(world.queue_scout(target.id))
+        self.assertFalse(world.queue_scout(target.id))   # no duplicates
+        result = world.advance()
+        self.assertIn(target.name, result["scout_completed"])
+        rep = world.scout_reports[target.id]
+        self.assertGreaterEqual(rep["potential_est"], int(rep["ability"]))
+        self.assertEqual(rep["attrs"].keys(), target.attrs.keys())
+        self.assertTrue(1 <= rep["stars"] <= 5)
+
+    def test_reports_survive_save_load(self):
+        world = GameWorld.new(seed=43)
+        world.user_club_id = 1
+        target = next(p for c in world.clubs.values() if c.id != 1
+                      for p in c.squad)
+        world.queue_scout(target.id)
+        world.advance()
+        clone = GameWorld.from_dict(json.loads(json.dumps(world.to_dict())))
+        self.assertIn(target.id, clone.scout_reports)   # int keys restored
+
+
+class TestEditor(unittest.TestCase):
+    def setUp(self):
+        self.world = GameWorld.new(seed=47)
+
+    def test_find_and_edit(self):
+        player = self.world.clubs[1].squad[0]
+        hits = editor.find_players(self.world, player.name[:6].lower())
+        self.assertTrue(any(p.id == player.id for p, _ in hits))
+        editor.set_name(player, "Test Legend")
+        self.assertEqual(player.name, "Test Legend")
+        editor.set_attribute(player, "shooting", 150)   # clamped
+        self.assertEqual(player.attrs["shooting"], 99.0)
+        editor.set_position(player, "fw")
+        self.assertEqual(player.position, "FW")
+        editor.set_potential(player, 1)                 # can't go below ability
+        self.assertGreaterEqual(player.potential, int(player.ability))
+        player.injured_for = 5
+        editor.heal(player)
+        self.assertEqual(player.injured_for, 0)
+
+    def test_move_player(self):
+        src, dst = self.world.clubs[1], self.world.clubs[30]
+        player = src.squad[0]
+        msg = editor.move_player(self.world, player, dst.id)
+        self.assertIn(dst.name, msg)
+        self.assertIn(player, dst.squad)
+        self.assertNotIn(player, src.squad)
+        self.assertEqual(player.club_id, dst.id)
+        # Moving to the same club is a no-op with a friendly message.
+        self.assertIn("already", editor.move_player(self.world, player, dst.id))
 
 
 class TestFormations(unittest.TestCase):

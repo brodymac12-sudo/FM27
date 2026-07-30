@@ -47,6 +47,8 @@ def _positional_need(club: Club) -> list[str]:
 
 def will_sell(seller: Club, player: Player, fee: float) -> bool:
     """Whether the selling club accepts a bid at this fee."""
+    if player.loaned_from is not None:
+        return False  # not theirs to sell
     if fee < player.value * 0.9:
         return False
     depth = len(seller.players_at(player.position))
@@ -81,14 +83,20 @@ def _candidates(buyer: Club, clubs: list[Club], pos: str,
         if len(seller.players_at(pos)) <= MIN_DEPTH[pos]:
             continue
         for p in seller.players_at(pos):
-            if p.value <= buyer.transfer_budget and p.ability > 40:
+            if (p.value <= buyer.transfer_budget and p.ability > 40
+                    and p.loaned_from is None):
                 out.append((seller, p))
     return out
 
 
 def run_ai_window(rng: random.Random, clubs: list[Club],
-                  user_club_id: int | None = None) -> list[Transfer]:
-    """One pre-season window of AI transfer activity. Returns completed deals."""
+                  user_club_id: int | None = None,
+                  max_buys: int = MAX_BUYS_PER_WINDOW) -> list[Transfer]:
+    """One window of AI transfer activity. Returns completed deals.
+
+    ``max_buys`` caps purchases per club — the January window passes a lower
+    cap than the summer one.
+    """
     completed: list[Transfer] = []
     # Richer clubs move first, like real life.
     order = sorted(clubs, key=lambda c: c.reputation, reverse=True)
@@ -97,7 +105,7 @@ def run_ai_window(rng: random.Random, clubs: list[Club],
             continue  # the user runs their own transfers
         buys = 0
         for pos in _positional_need(buyer):
-            if buys >= MAX_BUYS_PER_WINDOW or buyer.transfer_budget < 1.0:
+            if buys >= max_buys or buyer.transfer_budget < 1.0:
                 break
             candidates = _candidates(buyer, clubs, pos, user_club_id)
             if not candidates:
@@ -117,19 +125,91 @@ def run_ai_window(rng: random.Random, clubs: list[Club],
     return completed
 
 
+# ---------------------------------------------------------------------- loans
+
+def loans_in_count(club: Club) -> int:
+    return sum(1 for p in club.squad if p.loaned_from is not None)
+
+
+def would_get_minutes(host: Club, player: Player) -> bool:
+    """Whether a loanee would realistically play at the host club."""
+    group = host.players_at(player.position)
+    if not group:
+        return True
+    avg = sum(p.ability for p in group) / len(group)
+    return player.ability >= avg - 4
+
+
+def execute_loan(parent: Club, host: Club, player: Player) -> str:
+    parent.remove_player(player)
+    player.loaned_from = parent.id
+    host.add_player(player)
+    player.morale = min(100.0, player.morale + 6)
+    return (f"LOAN: {player.name} ({player.position}, {player.age}) — "
+            f"{parent.name} → {host.name} (season loan)")
+
+
+def loan_prospects(parent: Club) -> list[Player]:
+    """Young players a club would consider loaning out for development."""
+    xi_ids = {p.id for p in parent.pick_lineup()}
+    return sorted(
+        (p for p in parent.squad
+         if p.age <= 22 and p.id not in xi_ids and p.loaned_from is None
+         and p.potential >= p.ability + 6
+         and len(parent.players_at(p.position)) > MIN_DEPTH[p.position]),
+        key=lambda p: -p.potential)
+
+
+def find_loan_host(rng: random.Random, clubs: list[Club], parent: Club,
+                   player: Player, user_club_id: int | None) -> Club | None:
+    hosts = [c for c in clubs
+             if c.id not in (parent.id, user_club_id)
+             and c.squad_strength < parent.squad_strength - 3
+             and loans_in_count(c) < 3
+             and would_get_minutes(c, player)]
+    if not hosts:
+        return None
+    # Prefer the strongest league the youngster can still get games in.
+    hosts.sort(key=lambda c: -c.squad_strength)
+    return rng.choice(hosts[:3])
+
+
+def run_ai_loans(rng: random.Random, clubs: list[Club],
+                 user_club_id: int | None = None, max_out: int = 2) -> list[str]:
+    """AI clubs loan surplus youngsters to clubs that will play them."""
+    deals: list[str] = []
+    for parent in sorted(clubs, key=lambda c: -c.reputation):
+        if parent.id == user_club_id:
+            continue
+        for player in loan_prospects(parent)[:max_out]:
+            if rng.random() < 0.4:      # not every prospect goes out
+                continue
+            host = find_loan_host(rng, clubs, parent, player, user_club_id)
+            if host is not None:
+                deals.append(execute_loan(parent, host, player))
+    return deals
+
+
 # ------------------------------------------------------------------ user side
 
 def scout_targets(clubs: list[Club], buyer: Club, position: str | None = None,
-                  max_value: float | None = None, limit: int = 25) -> list[Player]:
+                  max_value: float | None = None, max_age: int | None = None,
+                  tier: int | None = None, limit: int = 25) -> list[Player]:
     """Players at other clubs the user could realistically bid for."""
     pool = []
     for c in clubs:
         if c.id == buyer.id:
             continue
+        if tier is not None and c.division != tier:
+            continue
         for p in c.squad:
+            if p.loaned_from is not None:
+                continue
             if position and p.position != position:
                 continue
             if max_value is not None and p.value > max_value:
+                continue
+            if max_age is not None and p.age > max_age:
                 continue
             pool.append(p)
     pool.sort(key=lambda p: p.ability, reverse=True)

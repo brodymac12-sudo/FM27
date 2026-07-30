@@ -112,8 +112,8 @@ def _expected_goals(attack: float, opp_defence: float, mid: float, opp_mid: floa
 def _pick_scorer(rng: random.Random, slots: list[tuple[str, Player]]) -> tuple[Player, Player | None]:
     """Weighted scorer + optional assister from the outfield players."""
     outfield = [(pos, p) for pos, p in slots if pos != "GK"]
-    pos_bias = {"DF": 0.35, "MF": 1.0, "FW": 3.2}
-    weights = [max(1.0, p.attrs["shooting"]) ** 2 * pos_bias[pos] for pos, p in outfield]
+    pos_bias = {"DF": 0.35, "MF": 1.0, "FW": 2.7}
+    weights = [max(1.0, p.attrs["shooting"]) ** 1.5 * pos_bias[pos] for pos, p in outfield]
     scorer = rng.choices([p for _, p in outfield], weights=weights)[0]
     assister = None
     if rng.random() < 0.72:
